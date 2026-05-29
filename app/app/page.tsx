@@ -46,6 +46,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -68,12 +69,23 @@ export default function DashboardPage() {
     return schedules.filter(s => s.beneficiary === publicKey);
   }, [schedules, roleFilter, publicKey]);
 
-  // Reset to page 1 whenever the filtered set changes
-  useEffect(() => { setPage(1); }, [filteredSchedules.length, roleFilter]);
+  // Apply address search on top of role-filtered list
+  const q = query.trim().toLowerCase();
+  const searchFiltered = useMemo(() => {
+    if (!q) return filteredSchedules;
+    return filteredSchedules.filter(
+      s =>
+        s.grantor.toLowerCase().includes(q) ||
+        s.beneficiary.toLowerCase().includes(q)
+    );
+  }, [filteredSchedules, q]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredSchedules.length / PAGE_SIZE));
+  // Reset to page 1 whenever the filtered set changes
+  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(searchFiltered.length / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
-  const paginated = filteredSchedules.slice(pageStart, pageStart + PAGE_SIZE);
+  const paginated = searchFiltered.slice(pageStart, pageStart + PAGE_SIZE);
 
   const handleExportCSV = () => {
     const csv = buildCSV(filteredSchedules);
@@ -137,6 +149,27 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Address search input */}
+        <div className="relative mb-6">
+          <input
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search by address…"
+            className="input pr-8"
+            aria-label="Search schedules by address"
+          />
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition-colors"
+              aria-label="Clear search"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
         {/* Schedule grid */}
         {loading && schedules.length === 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -144,22 +177,26 @@ export default function DashboardPage() {
               <div key={i} className="h-56 rounded-2xl bg-white/3 animate-pulse" />
             ))}
           </div>
-        ) : filteredSchedules.length === 0 ? (
+        ) : searchFiltered.length === 0 ? (
           <div className="card p-16 text-center">
             <p className="text-4xl mb-4">🔒</p>
             <p className="text-zinc-400">
-              {publicKey
+              {q
+                ? "No schedules match that address."
+                : publicKey
                 ? roleFilter !== "all"
                   ? `No schedules where you are the ${roleFilter}.`
                   : "No vesting schedules found for your wallet."
                 : "Connect your wallet to see your schedules."}
             </p>
-            <Link
-              href="/app/create"
-              className="inline-block mt-5 btn-primary rounded-lg px-5 py-2.5 text-sm font-semibold text-white"
-            >
-              Create Your First Schedule
-            </Link>
+            {!q && (
+              <Link
+                href="/app/create"
+                className="inline-block mt-5 btn-primary rounded-lg px-5 py-2.5 text-sm font-semibold text-white"
+              >
+                Create Your First Schedule
+              </Link>
+            )}
           </div>
         ) : (
           <>
@@ -174,11 +211,11 @@ export default function DashboardPage() {
               <p className="text-sm text-zinc-500">
                 Showing{" "}
                 <span className="text-zinc-300">
-                  {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filteredSchedules.length)}
+                  {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, searchFiltered.length)}
                 </span>{" "}
                 of{" "}
-                <span className="text-zinc-300">{filteredSchedules.length}</span>{" "}
-                schedule{filteredSchedules.length !== 1 ? "s" : ""}
+                <span className="text-zinc-300">{searchFiltered.length}</span>{" "}
+                schedule{searchFiltered.length !== 1 ? "s" : ""}
               </p>
               {totalPages > 1 && (
                 <div className="flex items-center gap-2">
