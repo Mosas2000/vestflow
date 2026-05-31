@@ -35,9 +35,15 @@
 //! | `"Duration must be positive"`   | `create_schedule` with `duration` = 0                            |
 //! | `"Cliff cannot exceed duration"`| `create_schedule` with `cliff_duration` > `duration`             |
 //! | `"Re-entrant call detected"`    | A state-mutating entry point is called while already executing   |
+//! | `"Upgrade authority already initialized"` | `initialize_upgrade_authority` called more than once |
+//! | `"Upgrade authority not initialized"` | Upgrade announcement/execution attempted before authority setup |
+//! | `"Unauthorized upgrade authority"` | Upgrade action signed by an address other than the authority |
+//! | `"No pending upgrade"` | Upgrade execution/cancellation attempted without an announcement |
+//! | `"Upgrade timelock still active"` | Upgrade execution attempted before 48 hours elapsed |
+//! | `"Upgrade executable time overflow"` | Upgrade announcement timestamp cannot safely add the timelock |
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, vec, Address, Env, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN, Env, Vec,
 };
 
 #[contracttype]
@@ -48,6 +54,25 @@ pub enum DataKey {
     /// Re-entrancy guard flag.
     /// Set to `true` while a state-mutating entry point is executing.
     Locked,
+    /// Address authorized to announce, execute, and cancel contract upgrades.
+    UpgradeAuthority,
+    /// The currently announced contract upgrade, if any.
+    PendingUpgrade,
+}
+
+/// Mandatory delay between an on-chain upgrade announcement and execution.
+pub const UPGRADE_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
+
+/// A contract WASM upgrade that has been announced on-chain but not yet executed.
+#[contracttype]
+#[derive(Clone, PartialEq)]
+pub struct PendingUpgrade {
+    /// Hash of the already-uploaded WASM blob to migrate this contract to.
+    pub wasm_hash: BytesN<32>,
+    /// Ledger timestamp when the upgrade was announced.
+    pub announced_at: u64,
+    /// Earliest ledger timestamp when the upgrade may be executed.
+    pub executable_at: u64,
 }
 
 /// The type of vesting curve applied to a schedule.
@@ -189,6 +214,160 @@ impl VestFlowContract {
     /// Release the re-entrancy lock.
     fn release_lock(env: &Env) {
         env.storage().instance().remove(&DataKey::Locked);
+    }
+
+    /// Read the configured upgrade authority.
+    ///
+    /// Panics with `"Upgrade authority not initialized"` when the authority
+    /// has not been configured yet.
+    fn read_upgrade_authority(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeAuthority)
+            .expect("Upgrade authority not initialized")
+    }
+
+    /// Initialize the address that may announce and execute contract upgrades.
+    ///
+    /// This may only be called once, and the chosen authority must authorize
+    /// the call. Once initialized, every contract WASM migration must be
+    /// announced with [`announce_upgrade`] and wait at least 48 hours before
+    /// [`execute_upgrade`] can apply it.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Upgrade authority already initialized"` if called again.
+    pub fn initialize_upgrade_authority(env: Env, authority: Address) {
+        assert!(
+            !env.storage().instance().has(&DataKey::UpgradeAuthority),
+            "Upgrade authority already initialized"
+        );
+        authority.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeAuthority, &authority);
+        env.events()
+            .publish((symbol_short!("upgr_auth"), authority), ());
+    }
+
+    /// Return the configured upgrade authority.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Upgrade authority not initialized"` if unset.
+    pub fn upgrade_authority(env: Env) -> Address {
+        Self::read_upgrade_authority(&env)
+    }
+
+    /// Return the pending upgrade announcement, if any.
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Announce an upcoming contract WASM migration on-chain.
+    ///
+    /// The WASM identified by `wasm_hash` should already be uploaded. This
+    /// function does not migrate the contract; it stores the pending upgrade
+    /// and emits an announcement event with an execution time 48 hours in the
+    /// future so users and monitoring systems can react before the change.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Upgrade authority not initialized"` if unset.
+    /// Panics with `"Unauthorized upgrade authority"` if `authority` is not the configured authority.
+    pub fn announce_upgrade(env: Env, authority: Address, wasm_hash: BytesN<32>) -> PendingUpgrade {
+        let configured = Self::read_upgrade_authority(&env);
+        assert!(authority == configured, "Unauthorized upgrade authority");
+        authority.require_auth();
+
+        let announced_at = env.ledger().timestamp();
+        let pending = PendingUpgrade {
+            wasm_hash,
+            announced_at,
+            executable_at: announced_at
+                .checked_add(UPGRADE_TIMELOCK_SECONDS)
+                .expect("Upgrade executable time overflow"),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &pending);
+        env.events().publish(
+            (symbol_short!("upgr_ann"), authority),
+            (
+                pending.wasm_hash.clone(),
+                pending.announced_at,
+                pending.executable_at,
+            ),
+        );
+
+        pending
+    }
+
+    /// Cancel the currently pending upgrade announcement.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"No pending upgrade"` when no upgrade is pending.
+    pub fn cancel_upgrade(env: Env, authority: Address) {
+        let configured = Self::read_upgrade_authority(&env);
+        assert!(authority == configured, "Unauthorized upgrade authority");
+        authority.require_auth();
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .expect("No pending upgrade");
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (symbol_short!("upgr_can"), authority),
+            (
+                pending.wasm_hash,
+                pending.announced_at,
+                pending.executable_at,
+            ),
+        );
+    }
+
+    /// Execute the pending contract WASM migration after the 48-hour timelock.
+    ///
+    /// The pending upgrade must have been announced on-chain by
+    /// [`announce_upgrade`] at least [`UPGRADE_TIMELOCK_SECONDS`] earlier.
+    /// Soroban applies the WASM replacement only after this invocation
+    /// completes successfully.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"No pending upgrade"` when no upgrade is pending.
+    /// Panics with `"Upgrade timelock still active"` before 48 hours elapse.
+    pub fn execute_upgrade(env: Env, authority: Address) {
+        let configured = Self::read_upgrade_authority(&env);
+        assert!(authority == configured, "Unauthorized upgrade authority");
+        authority.require_auth();
+
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .expect("No pending upgrade");
+        assert!(
+            env.ledger().timestamp() >= pending.executable_at,
+            "Upgrade timelock still active"
+        );
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (symbol_short!("upgr_exe"), authority),
+            (
+                pending.wasm_hash.clone(),
+                pending.announced_at,
+                pending.executable_at,
+            ),
+        );
+        env.deployer()
+            .update_current_contract_wasm(pending.wasm_hash);
     }
 
     /// Create a new vesting schedule and lock the tokens into the contract.
@@ -418,7 +597,15 @@ mod test {
         Env,
     };
 
-    fn setup(env: &Env) -> (VestFlowContractClient, Address, Address, Address, Address) {
+    fn setup(
+        env: &Env,
+    ) -> (
+        VestFlowContractClient<'_>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         let contract_id = env.register(VestFlowContract, ());
         let client = VestFlowContractClient::new(env, &contract_id);
         let grantor = Address::generate(env);
@@ -443,6 +630,96 @@ mod test {
             min_persistent_entry_ttl: 10,
             max_entry_ttl: 3110400,
         });
+    }
+
+    fn wasm_hash(env: &Env, byte: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[byte; 32])
+    }
+
+    #[test]
+    fn test_initialize_upgrade_authority_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+
+        client.initialize_upgrade_authority(&token_admin);
+
+        assert_eq!(client.upgrade_authority(), token_admin);
+        assert!(client.pending_upgrade().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade authority already initialized")]
+    fn test_initialize_upgrade_authority_rejects_second_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+        let other = Address::generate(&env);
+
+        client.initialize_upgrade_authority(&token_admin);
+        client.initialize_upgrade_authority(&other);
+    }
+
+    #[test]
+    fn test_announce_upgrade_sets_48_hour_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+        let hash = wasm_hash(&env, 7);
+
+        set_time(&env, 1_000);
+        client.initialize_upgrade_authority(&token_admin);
+        let pending = client.announce_upgrade(&token_admin, &hash);
+
+        assert_eq!(pending.wasm_hash, hash);
+        assert_eq!(pending.announced_at, 1_000);
+        assert_eq!(pending.executable_at, 1_000 + UPGRADE_TIMELOCK_SECONDS);
+        let stored = client.pending_upgrade().unwrap();
+        assert_eq!(stored.wasm_hash, pending.wasm_hash);
+        assert_eq!(stored.announced_at, pending.announced_at);
+        assert_eq!(stored.executable_at, pending.executable_at);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized upgrade authority")]
+    fn test_announce_upgrade_rejects_non_authority() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        client.initialize_upgrade_authority(&token_admin);
+        client.announce_upgrade(&attacker, &wasm_hash(&env, 8));
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade timelock still active")]
+    fn test_execute_upgrade_rejects_before_48_hours() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+
+        set_time(&env, 2_000);
+        client.initialize_upgrade_authority(&token_admin);
+        client.announce_upgrade(&token_admin, &wasm_hash(&env, 9));
+        set_time(&env, 2_000 + UPGRADE_TIMELOCK_SECONDS - 1);
+
+        client.execute_upgrade(&token_admin);
+    }
+
+    #[test]
+    fn test_cancel_upgrade_clears_pending_upgrade() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+
+        client.initialize_upgrade_authority(&token_admin);
+        client.announce_upgrade(&token_admin, &wasm_hash(&env, 10));
+        assert!(client.pending_upgrade().is_some());
+
+        client.cancel_upgrade(&token_admin);
+
+        assert!(client.pending_upgrade().is_none());
     }
 
     #[test]
