@@ -2,10 +2,11 @@ import { getSchedule } from "@/lib/stellar";
 import { Metadata } from "next";
 
 export async function generateMetadata(
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ): Promise<Metadata> {
   try {
-    const scheduleId = parseInt(params.id, 10);
+    const { id } = await params;
+    const scheduleId = parseInt(id, 10);
     if (isNaN(scheduleId)) {
       return {
         title: "Schedule Not Found — VestFlow",
