@@ -58,6 +58,10 @@ pub enum DataKey {
     UpgradeAuthority,
     /// The currently announced contract upgrade, if any.
     PendingUpgrade,
+    /// Index of schedule IDs created by a grantor.
+    GrantorSchedules(Address),
+    /// Index of schedule IDs where an address is the beneficiary.
+    BeneficiarySchedules(Address),
 }
 
 /// Mandatory delay between an on-chain upgrade announcement and execution.
@@ -412,8 +416,8 @@ impl VestFlowContract {
         let schedule = VestingSchedule {
             id,
             grantor: grantor.clone(),
-            beneficiary,
-            token,
+            beneficiary: beneficiary.clone(),
+            token: token.clone(),
             total_amount,
             claimed: 0,
             start_time,
@@ -429,8 +433,32 @@ impl VestFlowContract {
             .set(&DataKey::Schedule(id), &schedule);
         env.storage().instance().set(&DataKey::ScheduleCount, &id);
 
-        env.events()
-            .publish((symbol_short!("created"), grantor), id);
+        // Maintain grantor schedule index
+        let mut grantor_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(grantor.clone()))
+            .unwrap_or(vec![&env]);
+        grantor_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::GrantorSchedules(grantor.clone()), &grantor_ids);
+
+        // Maintain beneficiary schedule index
+        let mut beneficiary_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or(vec![&env]);
+        beneficiary_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::BeneficiarySchedules(beneficiary), &beneficiary_ids);
+
+        env.events().publish(
+            (symbol_short!("created"), grantor, beneficiary, token),
+            (id, total_amount),
+        );
 
         id
     }
@@ -471,8 +499,8 @@ impl VestFlowContract {
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
         env.events().publish(
-            (symbol_short!("claimed"), schedule.beneficiary.clone()),
-            (schedule_id, claimable),
+            (symbol_short!("claimed"), schedule.beneficiary.clone(), schedule.token.clone()),
+            (schedule_id, claimable, schedule.claimed),
         );
 
         Self::release_lock(&env);
@@ -520,8 +548,8 @@ impl VestFlowContract {
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
         env.events().publish(
-            (symbol_short!("revoked"), schedule.grantor.clone()),
-            (schedule_id, unvested),
+            (symbol_short!("revoked"), schedule.grantor.clone(), schedule.token.clone()),
+            (schedule_id, unvested, vested),
         );
 
         Self::release_lock(&env);
@@ -545,6 +573,26 @@ impl VestFlowContract {
             .instance()
             .get(&DataKey::ScheduleCount)
             .unwrap_or(0)
+    }
+
+    /// Return schedule IDs created by a given grantor.
+    ///
+    /// Returns an empty vec if the grantor has not created any schedules.
+    pub fn get_schedules_by_grantor(env: Env, grantor: Address) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(grantor))
+            .unwrap_or(vec![&env])
+    }
+
+    /// Return schedule IDs where the given address is the beneficiary.
+    ///
+    /// Returns an empty vec if the address has no beneficiary schedules.
+    pub fn get_schedules_by_beneficiary(env: Env, beneficiary: Address) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary))
+            .unwrap_or(vec![&env])
     }
 
     /// Preview how many tokens are claimable right now for a given schedule.
@@ -815,6 +863,41 @@ mod test {
         let grantor_before = token.balance(&grantor);
         client.revoke(&id);
         assert_eq!(token.balance(&grantor), grantor_before + 750);
+    }
+
+    #[test]
+    fn test_revoke_after_full_vest_returns_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        // Fully vested
+        set_time(&env, 1000);
+        assert_eq!(client.claimable(&id), 1000);
+
+        // Revoke after full vest — grantor gets nothing back
+        let grantor_before = token.balance(&grantor);
+        client.revoke(&id);
+        assert_eq!(token.balance(&grantor), grantor_before);
+        assert!(client.get_schedule(&id).revoked);
+
+        // Beneficiary can still claim the full amount
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 1000);
     }
 
     #[test]
