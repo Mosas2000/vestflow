@@ -11,6 +11,7 @@ import {
   revokeSchedule,
   parseContractError,
   NETWORK,
+  NATIVE_TOKEN,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useToast } from "@/components/Toast";
@@ -32,14 +33,26 @@ export default function ScheduleCard({
   const progress = vestingProgress(schedule, now);
 
   // Claimed percentage relative to total (for the dual progress bar)
-  const claimedPct = schedule.total_amount > 0n
-    ? Math.min(100, Math.round((Number(schedule.claimed) / Number(schedule.total_amount)) * 100))
-    : 0;
+  const claimedPct =
+    schedule.total_amount > 0n
+      ? Math.min(
+          100,
+          Math.round(
+            (Number(schedule.claimed) / Number(schedule.total_amount)) * 100
+          )
+        )
+      : 0;
 
   const isBeneficiary = publicKey === schedule.beneficiary;
   const isGrantor = publicKey === schedule.grantor;
-  const vested = BigInt(Math.floor((Number(schedule.total_amount) * progress) / 100));
+  const vested = BigInt(
+    Math.floor((Number(schedule.total_amount) * progress) / 100)
+  );
   const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : 0n;
+
+  // SEP-41 token symbol support (upstream #165)
+  const isNative = schedule.token === NATIVE_TOKEN;
+  const tokenSymbol = isNative ? "XLM" : `Token (${truncate(schedule.token, 4, 4)})`;
 
   // ── Claim ──────────────────────────────────────────────────────────────────
   const handleClaim = async () => {
@@ -57,7 +70,7 @@ export default function ScheduleCard({
       updateToast(toastId, {
         status: "success",
         title: "Tokens claimed!",
-        message: `${stroopsToXlm(claimableAmt)} XLM transferred to your wallet.`,
+        message: `${stroopsToXlm(claimableAmt)} ${tokenSymbol} transferred to your wallet.`,
         txHash: hash,
         network: NETWORK,
       });
@@ -155,11 +168,15 @@ export default function ScheduleCard({
         </div>
         <div>
           <span className="text-zinc-600">Total</span>
-          <p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.total_amount)} XLM</p>
+          <p className="text-zinc-300 mt-0.5">
+            {stroopsToXlm(schedule.total_amount)} {tokenSymbol}
+          </p>
         </div>
         <div>
           <span className="text-zinc-600">Claimed</span>
-          <p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.claimed)} XLM</p>
+          <p className="text-zinc-300 mt-0.5">
+            {stroopsToXlm(schedule.claimed)} {tokenSymbol}
+          </p>
         </div>
         <div>
           <span className="text-zinc-600">Starts</span>
@@ -171,6 +188,12 @@ export default function ScheduleCard({
             {formatDate(schedule.start_time + schedule.duration)}
           </p>
         </div>
+        {!isNative && (
+          <div className="col-span-2">
+            <span className="text-zinc-600">Token Contract</span>
+            <p className="font-mono text-zinc-300 mt-0.5 break-all">{schedule.token}</p>
+          </div>
+        )}
       </div>
 
       {/* ── Dual progress bar (#86) ─────────────────────────────────────────── */}
@@ -193,7 +216,9 @@ export default function ScheduleCard({
               Claimed {claimedPct}%
             </span>
           </div>
-          <span className="text-zinc-600">{stroopsToXlm(schedule.total_amount)} XLM</span>
+          <span className="text-zinc-600">
+            {stroopsToXlm(schedule.total_amount)} {tokenSymbol}
+          </span>
         </div>
 
         {/* Track */}
@@ -259,7 +284,7 @@ export default function ScheduleCard({
             >
               {loading === "claim"
                 ? "Processing…"
-                : `Claim ${stroopsToXlm(claimableAmt)} XLM`}
+                : `Claim ${stroopsToXlm(claimableAmt)} ${tokenSymbol}`}
             </button>
           )}
           {isGrantor && schedule.revocable && progress < 100 && (
