@@ -1394,4 +1394,166 @@ mod test {
         }]);
         client.transfer_beneficiary(&id, &attacker);
     }
+
+
+// --- Issue #96: e2e integration tests ---
+
+    /// Verify that create_schedule stores all fields correctly.
+    #[test]
+    fn test_create_schedule_stores_fields_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &5000,
+            &1000,
+            &2000,
+            &500,
+            &VestingKind::LinearWithCliff,
+            &true,
+        );
+
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.id, id);
+        assert_eq!(schedule.grantor, grantor);
+        assert_eq!(schedule.beneficiary, beneficiary);
+        assert_eq!(schedule.token, token_addr);
+        assert_eq!(schedule.total_amount, 5000);
+        assert_eq!(schedule.claimed, 0);
+        assert_eq!(schedule.start_time, 1000);
+        assert_eq!(schedule.duration, 2000);
+        assert_eq!(schedule.cliff_duration, 500);
+        assert_eq!(schedule.revocable, true);
+        assert_eq!(schedule.revoked, false);
+        assert_eq!(schedule.vested_at_revoke, 0);
+        assert_eq!(client.schedule_count(), id);
+    }
+
+    /// Revoke a LinearWithCliff schedule while still inside the cliff window.
+    /// Since 0 tokens have vested, the grantor gets the full amount back and
+    /// the beneficiary has nothing to claim.
+    #[test]
+    fn test_revoke_before_cliff_returns_full_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        // 1000s duration, 500s cliff
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &500,
+            &VestingKind::LinearWithCliff,
+            &true,
+        );
+
+        // Revoke before cliff — 0 tokens have vested
+        let grantor_before = token.balance(&grantor);
+        set_time(&env, 499);
+        client.revoke(&id);
+
+        // Grantor gets everything back
+        assert_eq!(token.balance(&grantor), grantor_before + 1000);
+
+        // Schedule is marked revoked with 0 vested at revoke
+        let schedule = client.get_schedule(&id);
+        assert!(schedule.revoked);
+        assert_eq!(schedule.vested_at_revoke, 0);
+
+        // Beneficiary has nothing to claim
+        assert_eq!(client.claimable(&id), 0);
+        assert_eq!(token.balance(&beneficiary), 0);
+    }
+
+    /// Revoke a LinearWithCliff schedule after the cliff but mid-way through
+    /// the linear window. Vested tokens stay claimable by the beneficiary;
+    /// unvested tokens return to the grantor.
+    #[test]
+    fn test_revoke_after_cliff_splits_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        // 1000s duration, 400s cliff → 600s linear window
+        // total_amount = 1200 so vested = 1200 * linear_elapsed / 600
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1200,
+            &0,
+            &1000,
+            &400,
+            &VestingKind::LinearWithCliff,
+            &true,
+        );
+
+        // At t=700: linear_elapsed = 700 - 400 = 300, linear_duration = 600
+        // vested = 1200 * 300 / 600 = 600, unvested = 600
+        set_time(&env, 700);
+        let grantor_before = token.balance(&grantor);
+        client.revoke(&id);
+
+        // Grantor gets back unvested 600
+        assert_eq!(token.balance(&grantor), grantor_before + 600);
+
+        // Schedule records vested_at_revoke = 600
+        let schedule = client.get_schedule(&id);
+        assert!(schedule.revoked);
+        assert_eq!(schedule.vested_at_revoke, 600);
+
+        // Beneficiary can still claim the 600 that vested before revocation
+        assert_eq!(client.claimable(&id), 600);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 600);
+    }
+
+    /// Edge amount: schedule with exactly 1 stroop (minimum positive amount).
+    /// Verifies the contract handles the smallest possible unit correctly.
+    #[test]
+    fn test_edge_amount_one_stroop() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1, // 1 stroop
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Before full vest: integer division floors to 0
+        set_time(&env, 500);
+        assert_eq!(client.claimable(&id), 0);
+
+        // At full vest: exactly 1 stroop claimable
+        set_time(&env, 1000);
+        assert_eq!(client.claimable(&id), 1);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 1);
+
+        // Nothing left to claim
+        assert_eq!(client.claimable(&id), 0);
+    }
 }
