@@ -34,6 +34,7 @@ conti#![no_std]
 //! | `"Duration must be positive"`   | `create_schedule` with `duration` = 0                            |
 //! | `"Cliff cannot exceed duration"`| `create_schedule` with `cliff_duration` > `duration`             |
 //! | `"Beneficiary must differ from grantor"` | `create_schedule` with `beneficiary == grantor`                 |
+//! | `"Start time cannot be in the past"` | `create_schedule` or `create_graded_schedule` with `start_time` < current ledger time |
 //! | `"Re-entrant call detected"`    | A state-mutating entry point is called while already executing   |
 //! | `"Upgrade authority already initialized"` | `initialize_upgrade_authority` called more than once |
 //! | `"Upgrade authority not initialized"` | Upgrade announcement/execution attempted before authority setup |
@@ -466,6 +467,7 @@ impl VestFlowContract {
     /// Panics with `"Duration must be positive"` if `duration` = 0.
     /// Panics with `"Cliff cannot exceed duration"` if `cliff_duration` > `duration`.
     /// Panics with `"Beneficiary must differ from grantor"` if `beneficiary == grantor`.
+    /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
     pub fn create_schedule(
         env: Env,
         grantor: Address,
@@ -484,6 +486,7 @@ impl VestFlowContract {
         assert!(total_amount > 0, "Amount must be positive");
         assert!(duration > 0, "Duration must be positive");
         assert!(cliff_duration <= duration, "Cliff cannot exceed duration");
+        assert!(start_time >= env.ledger().timestamp(), "Start time cannot be in the past");
 
         let count: u64 = env
             .storage()
@@ -565,6 +568,7 @@ impl VestFlowContract {
     /// # Errors
     ///
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
+    /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
     /// Panics with `"Milestones required"` if the milestones list is empty.
     /// Panics with `"Milestones must sum to 10000 bps"` if the bps total ≠ 10 000.
     pub fn create_graded_schedule(
@@ -581,6 +585,7 @@ impl VestFlowContract {
 
         assert!(beneficiary != grantor, "Beneficiary must differ from grantor");
         assert!(total_amount > 0, "Amount must be positive");
+        assert!(start_time >= env.ledger().timestamp(), "Start time cannot be in the past");
         assert!(!milestones.is_empty(), "Milestones required");
 
         let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
@@ -1925,5 +1930,97 @@ mod test {
             },
         }]);
         client.transfer_beneficiary(&id, &attacker);
+    }
+
+    // --- Issue #77: start_time validation tests ---
+
+    #[test]
+    #[should_panic(expected = "Start time cannot be in the past")]
+    fn test_create_schedule_rejects_past_start_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        // Try to create schedule with start_time=500 (before current ledger time)
+        client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &500,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Start time cannot be in the past")]
+    fn test_create_graded_schedule_rejects_past_start_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let milestones = soroban_sdk::vec![
+            &env,
+            GradedMilestone { offset_secs: 600, bps: 10_000 },
+        ];
+        // Try to create schedule with start_time=500 (before current ledger time)
+        client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &500,
+            &false,
+            &milestones,
+        );
+    }
+
+    #[test]
+    fn test_create_schedule_allows_current_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        // Create schedule with start_time equal to current time should succeed
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn test_create_schedule_allows_future_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        // Create schedule with start_time in the future should succeed
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &2000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        assert!(id > 0);
     }
 }
