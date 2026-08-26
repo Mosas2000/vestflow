@@ -24,6 +24,7 @@ import {
   NATIVE_TOKEN,
   NETWORK,
   stroopsToXlm,
+  revokeSchedule,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
@@ -249,6 +250,103 @@ function StreamsAnalyticsSummary({ publicKey, refreshKey }: { publicKey: string;
   );
 }
 
+// ── Outgoing Streams List (#632) ──────────────────────────────────────────────
+
+function OutgoingStreamsList({
+  schedules,
+  publicKey,
+  onEdit,
+  onStop,
+}: {
+  schedules: ScheduleData[];
+  publicKey: string;
+  onEdit: (s: ScheduleData) => void;
+  onStop: (s: ScheduleData) => void;
+}) {
+  const outgoing = schedules.filter(
+    (s) => s.grantor === publicKey && !s.revoked,
+  );
+
+  if (outgoing.length === 0) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="mb-4">
+        <h2 className="text-lg font-semibold">Outgoing Streams</h2>
+        <p className="text-sm text-zinc-500">All active vesting schedules sent from your wallet</p>
+      </div>
+      <div className="divide-y divide-white/10">
+        {outgoing.map((s) => {
+          const ratePerSec = s.duration > 0 ? s.total_amount / BigInt(s.duration) : 0n;
+          const ratePerDay = ratePerSec * 86400n;
+          const endTime = s.start_time + s.duration;
+          const secsLeft = Math.max(0, endTime - now);
+          const daysLeft = Math.floor(secsLeft / 86400);
+          const isNative = s.token === NATIVE_TOKEN;
+          const tokenSym = isNative ? "XLM" : `${s.token.slice(0, 5)}…`;
+
+          return (
+            <div key={s.id} className="flex items-start justify-between gap-4 py-4 text-sm">
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Link
+                    href={`/schedule/${s.id}`}
+                    className="font-semibold text-zinc-200 hover:text-violet-300 transition-colors"
+                  >
+                    Schedule #{s.id}
+                  </Link>
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
+                    {s.kind === "LinearWithCliff" ? "Lin+Cliff" : s.kind}
+                  </span>
+                </div>
+                <p className="text-zinc-500 font-mono text-xs truncate">
+                  → {s.beneficiary.slice(0, 10)}…{s.beneficiary.slice(-6)}
+                </p>
+                <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-zinc-500">
+                  <span>
+                    Rate:{" "}
+                    <span className="text-zinc-300">
+                      {stroopsToXlm(ratePerDay)} {tokenSym}/day
+                    </span>
+                  </span>
+                  <span>
+                    Remaining:{" "}
+                    <span className={daysLeft < 7 ? "text-amber-400" : "text-zinc-300"}>
+                      {daysLeft}d
+                    </span>
+                  </span>
+                  <span>
+                    Total:{" "}
+                    <span className="text-zinc-300">
+                      {stroopsToXlm(s.total_amount)} {tokenSym}
+                    </span>
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => onEdit(s)}
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium border border-white/10 text-zinc-300 hover:border-white/20 transition-colors"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => onStop(s)}
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-colors"
+                >
+                  Stop
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function RecentGives({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
   const [gives, setGives] = useState<IndexedEvent[]>([]);
 
@@ -359,6 +457,8 @@ export default function DashboardPage() {
   const [query, setQuery] = useState("");
   const [showQrModal, setShowQrModal] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [stopConfirmSchedule, setStopConfirmSchedule] = useState<ScheduleData | null>(null);
+  const [stoppingId, setStoppingId] = useState<number | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -600,6 +700,14 @@ export default function DashboardPage() {
         {/* Summary stats — animated count-up (#270) */}
         {publicKey && stats && <AnimatedStats stats={stats} />}
         {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && schedules.length > 0 && (
+          <OutgoingStreamsList
+            schedules={schedules}
+            publicKey={publicKey}
+            onEdit={(s) => { window.location.href = `/schedule/${s.id}`; }}
+            onStop={(s) => setStopConfirmSchedule(s)}
+          />
+        )}
         {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}
 
         {/* Recently viewed schedules (#416) */}
@@ -837,6 +945,53 @@ export default function DashboardPage() {
 
       {/* Onboarding Tour */}
       <OnboardingTour />
+
+      {/* Stop Stream confirmation dialog */}
+      {stopConfirmSchedule && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Stop stream confirmation"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        >
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setStopConfirmSchedule(null)} />
+          <div className="relative z-10 w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl">
+            <h2 className="text-lg font-bold mb-2">Stop Stream?</h2>
+            <p className="text-sm text-zinc-400 mb-5">
+              This will revoke schedule #{stopConfirmSchedule.id} and stop all future vesting. Unvested tokens will be returned to your wallet.
+              This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setStopConfirmSchedule(null)}
+                disabled={stoppingId !== null}
+                className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={stoppingId !== null}
+                onClick={async () => {
+                  if (!publicKey || !stopConfirmSchedule) return;
+                  setStoppingId(stopConfirmSchedule.id);
+                  try {
+                    await revokeSchedule(publicKey, stopConfirmSchedule.id);
+                    setStopConfirmSchedule(null);
+                    setRefreshKey((k) => k + 1);
+                  } catch {
+                    // leave dialog open on error so user sees failure
+                  } finally {
+                    setStoppingId(null);
+                  }
+                }}
+                className="flex-1 rounded-xl bg-red-600 hover:bg-red-700 py-2.5 text-sm font-semibold transition-colors disabled:opacity-50"
+              >
+                {stoppingId === stopConfirmSchedule.id ? "Stopping…" : "Stop Stream"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
