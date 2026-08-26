@@ -35,6 +35,8 @@ import Link from "next/link";
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
 import WalletQrModal from "@/components/WalletQrModal";
 import OnboardingTour from "@/components/OnboardingTour";
+import CycleCountdown from "@/components/CycleCountdown";
+import IncomingStreamsList from "@/components/IncomingStreamsList";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
@@ -708,8 +710,16 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* Cycle countdown timer (#630) */}
+        {publicKey && (
+          <div className="mb-6">
+            <CycleCountdown onCycleEnd={() => setRefreshKey((k) => k + 1)} />
+          </div>
+        )}
+
         {/* Summary stats — animated count-up (#270) */}
         {publicKey && stats && <AnimatedStats stats={stats} />}
+        {publicKey && <IncomingStreamsList publicKey={publicKey} refreshKey={refreshKey} />}
         {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
         {publicKey && schedules.length > 0 && (
           <OutgoingStreamsList

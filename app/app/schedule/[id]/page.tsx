@@ -32,6 +32,20 @@ import { useXlmPrice, formatUsd } from "@/lib/price";
 import { ScheduleDetailSkeleton } from "@/components/ScheduleCardSkeleton";
 import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 
+function formatDuration(seconds: number): string {
+  if (seconds <= 0) return "0s";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (parts.length === 0) parts.push(`${secs}s`);
+  return parts.join(" ");
+}
+
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { publicKey } = useWallet();
@@ -51,6 +65,10 @@ export default function ScheduleDetailPage() {
   const [previewDate, setPreviewDate] = useState("");
   const [previewAmount, setPreviewAmount] = useState<bigint | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Streaming balance state (#628)
+  const [streamingBalance, setStreamingBalance] = useState<bigint | null>(null);
+  const [streamingRatePerSec, setStreamingRatePerSec] = useState<bigint>(0n);
 
   // Transfer grantor state (#262)
   const [showTransferGrantor, setShowTransferGrantor] = useState(false);
@@ -77,6 +95,31 @@ export default function ScheduleDetailPage() {
       setShareUrl(`${window.location.origin}/app/schedule/${id}`);
     }
   }, [id]);
+
+  // Poll streaming balance every 5 seconds (#628)
+  useEffect(() => {
+    if (!schedule || schedule.revoked) return;
+    let active = true;
+
+    const fetchBalance = async () => {
+      try {
+        const res = await fetch(
+          `/api/streams/balance?account=${encodeURIComponent(schedule.beneficiary)}&token=${encodeURIComponent(schedule.token)}`
+        );
+        if (!res.ok || !active) return;
+        const data = await res.json();
+        if (!active) return;
+        setStreamingBalance(BigInt(data.streamingBalance ?? 0));
+        setStreamingRatePerSec(BigInt(data.streamingRatePerSec ?? 0));
+      } catch {
+        // ignore polling errors
+      }
+    };
+
+    fetchBalance();
+    const interval = setInterval(fetchBalance, 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, [schedule]);
 
   // Distinguish this tab from other open schedule tabs — the layout's static
   // "VestFlow" title otherwise makes every schedule page indistinguishable.
@@ -323,6 +366,58 @@ export default function ScheduleDetailPage() {
               )}
             </div>
           </div>
+
+          {/* Streaming balance progress bar (#628) */}
+          {!schedule.revoked && streamingBalance !== null && (
+            <div>
+              <p className="text-xs text-zinc-500 mb-2 uppercase tracking-wider">Streaming Balance</p>
+              {(() => {
+                const total = schedule.total_amount;
+                const remaining = streamingBalance > total ? total : streamingBalance;
+                const pct = total > 0n ? Math.min(100, Math.round((Number(remaining) / Number(total)) * 100)) : 0;
+                const rate = streamingRatePerSec;
+                const hasEnd = schedule.duration > 0;
+                const endTime = schedule.start_time + schedule.duration;
+                const nowSec = Math.floor(Date.now() / 1000);
+                const secsLeft = hasEnd ? Math.max(0, endTime - nowSec) : 0;
+                const estimatedRemaining = rate > 0n && remaining > 0n
+                  ? Number(remaining) / Number(rate)
+                  : 0;
+                const timeLeft = rate > 0n && remaining > 0n
+                  ? formatDuration(estimatedRemaining)
+                  : "Never";
+                return (
+                  <>
+                    <div className="flex justify-between text-xs text-zinc-400 mb-1.5">
+                      <span>
+                        {stroopsToXlm(remaining)} XLM remaining
+                      </span>
+                      <span className="text-zinc-500">
+                        {rate > 0n ? `${stroopsToXlm(rate)}/s` : "Paused"}
+                      </span>
+                    </div>
+                    <div
+                      className="relative h-2 rounded-full bg-white/5 overflow-hidden"
+                      role="progressbar"
+                      aria-label={`Streaming balance: ${pct}% remaining`}
+                      aria-valuenow={pct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      <div
+                        className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-1000"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-xs text-zinc-500 mt-1.5">
+                      <span>Estimated time remaining</span>
+                      <span className="tabular-nums text-zinc-300">{timeLeft}</span>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
 
           {/* Details grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
