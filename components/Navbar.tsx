@@ -116,11 +116,11 @@ export default function Navbar() {
 
       {/* Desktop nav links */}
       <div className="hidden md:flex items-center gap-8 text-sm text-zinc-400">
-        <Link href="/app" className="hover:text-white transition-colors">Dashboard</Link>
+        <Link href="/app" data-tour="dashboard-link" className="hover:text-white transition-colors">Dashboard</Link>
         <Link href="/app/portfolio" className="hover:text-white transition-colors">Portfolio</Link>
         <Link href="/app/history" className="hover:text-white transition-colors">History</Link>
         <Link href="/app/beneficiary" className="hover:text-white transition-colors">Beneficiary</Link>
-        <Link href="/app/create" className="hover:text-white transition-colors">New Schedule</Link>
+        <Link href="/app/create" data-tour="create-button" className="hover:text-white transition-colors">New Schedule</Link>
         <Link href="/analytics" className="hover:text-white transition-colors">Analytics</Link>
         <Link href="/widget" className="hover:text-white transition-colors">Widget</Link>
         <Link href="/learn" className="hover:text-white transition-colors">Learn</Link>
@@ -243,7 +243,9 @@ export default function Navbar() {
           )}
         </button>
 
-        <WalletButton />
+        <div data-tour="wallet-button">
+          <WalletButton />
+        </div>
 
         {/* Network badge inline on mobile */}
         <span

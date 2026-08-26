@@ -29,6 +29,8 @@ import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import Link from "next/link";
 
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
+import WalletQrModal from "@/components/WalletQrModal";
+import OnboardingTour from "@/components/OnboardingTour";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
@@ -169,6 +171,7 @@ export default function DashboardPage() {
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
+  const [showQrModal, setShowQrModal] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -372,6 +375,18 @@ export default function DashboardPage() {
             <p className="text-zinc-400 mt-1">Your active vesting schedules</p>
           </div>
           <div className="flex gap-3 flex-wrap items-center">
+            {publicKey && (
+              <button
+                onClick={() => setShowQrModal(true)}
+                className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-2 transition-colors flex items-center gap-1.5"
+                aria-label="Show wallet QR code"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                </svg>
+                Wallet QR
+              </button>
+            )}
             <button
               onClick={load}
               disabled={loading}
@@ -629,6 +644,18 @@ export default function DashboardPage() {
           </>
         )}
       </main>
+
+      {/* QR Code Modal */}
+      {publicKey && (
+        <WalletQrModal
+          address={publicKey}
+          open={showQrModal}
+          onClose={() => setShowQrModal(false)}
+        />
+      )}
+
+      {/* Onboarding Tour */}
+      <OnboardingTour />
     </>
   );
 }
