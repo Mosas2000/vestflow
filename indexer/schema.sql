@@ -341,3 +341,25 @@ CREATE TABLE IF NOT EXISTS gap_detection_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_gap_detection_checked ON gap_detection_log (checked_at);
+
+-- ── Give events ───────────────────────────────────────────────────────
+-- Tracks one-shot token give events emitted by the contract.
+-- Optional sender=, receiver=, token=, from=, to= filters; paginated.
+CREATE TABLE IF NOT EXISTS gives (
+  id          TEXT PRIMARY KEY,          -- Stellar event ID "<ledger>-<txIndex>-<eventIndex>"
+  sender      TEXT NOT NULL,
+  receiver    TEXT NOT NULL,
+  token       TEXT NOT NULL,
+  amount      TEXT NOT NULL,             -- bigint as decimal string
+  timestamp   INTEGER NOT NULL,          -- ledger_closed_at as unix seconds
+  ledger      INTEGER NOT NULL,
+  raw_topics  TEXT NOT NULL,
+  raw_value   TEXT NOT NULL,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_gives_sender    ON gives (sender);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver  ON gives (receiver);
+CREATE INDEX IF NOT EXISTS idx_gives_token     ON gives (token);
+CREATE INDEX IF NOT EXISTS idx_gives_timestamp ON gives (timestamp);
+CREATE INDEX IF NOT EXISTS idx_gives_ledger    ON gives (ledger);

@@ -1415,3 +1415,96 @@ export function getLastGapDetection(network?: NetworkName): GapDetectionLogEntry
     .get() as GapDetectionLogEntry | undefined;
   return row || null;
 }
+
+// ── Give Events ───────────────────────────────────────────────────────────
+
+import type { GiveEvent, GiveQueryParams } from "./types";
+
+export interface InsertGiveRow {
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount: string;
+  timestamp: number;
+  ledger: number;
+  raw_topics: string;
+  raw_value: string;
+}
+
+/**
+ * Insert a give event row. Returns true if a new row was written, false for
+ * duplicates (idempotent — safe to call multiple times with the same id).
+ */
+export function insertGive(row: InsertGiveRow, network?: NetworkName): boolean {
+  const result = getDb(network)
+    .prepare(
+      `INSERT OR IGNORE INTO gives
+         (id, sender, receiver, token, amount, timestamp, ledger, raw_topics, raw_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      row.id,
+      row.sender,
+      row.receiver,
+      row.token,
+      row.amount,
+      row.timestamp,
+      row.ledger,
+      row.raw_topics,
+      row.raw_value,
+    );
+  return result.changes > 0;
+}
+
+/**
+ * Query give events with optional filters.
+ * Results ordered by timestamp DESC (newest first).
+ * Supports cursor-based pagination via the `cursor` param (last seen id).
+ */
+export function queryGives(params: GiveQueryParams): GiveEvent[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (params.sender) {
+    conditions.push("sender = ?");
+    values.push(params.sender);
+  }
+  if (params.receiver) {
+    conditions.push("receiver = ?");
+    values.push(params.receiver);
+  }
+  if (params.token) {
+    conditions.push("token = ?");
+    values.push(params.token);
+  }
+  if (params.from) {
+    const fromTs = Math.floor(new Date(params.from).getTime() / 1000);
+    conditions.push("timestamp >= ?");
+    values.push(fromTs);
+  }
+  if (params.to) {
+    const toTs = Math.floor(new Date(params.to).getTime() / 1000);
+    conditions.push("timestamp <= ?");
+    values.push(toTs);
+  }
+  if (params.cursor) {
+    // Cursor is the id of the last item on the previous page.
+    // Because rows are ordered by (timestamp DESC, id ASC) we need events
+    // that come after the cursor in that sort order.
+    const cursorRow = getDb(params.network)
+      .prepare("SELECT timestamp, id FROM gives WHERE id = ?")
+      .get(params.cursor) as { timestamp: number; id: string } | undefined;
+    if (cursorRow) {
+      conditions.push("(timestamp < ? OR (timestamp = ? AND id > ?))");
+      values.push(cursorRow.timestamp, cursorRow.timestamp, cursorRow.id);
+    }
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = Math.min(params.limit ?? 20, 100);
+
+  return getDb(params.network)
+    .prepare(`SELECT * FROM gives ${where} ORDER BY timestamp DESC, id ASC LIMIT ?`)
+    .all(...values, limit) as GiveEvent[];
+}
