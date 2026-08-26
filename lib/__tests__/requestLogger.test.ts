@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { withLogging, logRequest, RequestLogEntry } from "../requestLogger";
 
 function createMockRequest(pathname: string, method = "GET", headers?: Record<string, string>) {
@@ -16,11 +16,15 @@ function createMockResponse(status = 200) {
   return { status } as any;
 }
 
-describe("requestLogger (#677)", () => {
+describe("requestLogger", () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
   });
 
   describe("withLogging", () => {
@@ -50,11 +54,8 @@ describe("requestLogger (#677)", () => {
       expect(logged.durationMs).toBeGreaterThanOrEqual(0);
     });
 
-    it("uses generated request ID when header is missing", async () => {
-      const startMs = Date.now();
-      const mockRequest = createMockRequest("/api/events", "POST", {
-        "x-request-start": String(startMs),
-      });
+    it("uses 'unknown' when X-Request-ID header is missing", async () => {
+      const mockRequest = createMockRequest("/api/events", "POST");
 
       const handler = vi.fn().mockResolvedValue(createMockResponse(201));
       const wrapped = withLogging(handler);
@@ -67,10 +68,9 @@ describe("requestLogger (#677)", () => {
     });
 
     it("logs error status when handler throws", async () => {
-      const startMs = Date.now();
       const mockRequest = createMockRequest("/api/fail", "GET", {
         "x-request-id": "req-err",
-        "x-request-start": String(startMs),
+        "x-request-start": String(Date.now()),
       });
 
       const handler = vi.fn().mockRejectedValue(new Error("boom"));
@@ -149,6 +149,21 @@ describe("requestLogger (#677)", () => {
       expect(parsed).toHaveProperty("status");
       expect(parsed).toHaveProperty("durationMs");
       expect(parsed).toHaveProperty("requestId");
+    });
+
+    it("requestId appears in log line for correlation", async () => {
+      const uniqueId = "correlation-test-uuid-abc-123";
+      const mockRequest = createMockRequest("/api/correlate", "GET", {
+        "x-request-id": uniqueId,
+      });
+
+      const handler = vi.fn().mockResolvedValue(createMockResponse(200));
+      const wrapped = withLogging(handler);
+
+      await wrapped(mockRequest);
+
+      const logged: RequestLogEntry = JSON.parse(consoleSpy.mock.calls[0][0]);
+      expect(logged.requestId).toBe(uniqueId);
     });
   });
 

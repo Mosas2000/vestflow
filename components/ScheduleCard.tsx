@@ -19,13 +19,14 @@ import VestingChart from "@/components/VestingChart";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 import { useCountdown, formatCountdown } from "@/hooks/useCountdown";
+import WalletConnectionGuard from "@/components/WalletConnectionGuard";
 
 export default function ScheduleCard({
   schedule,
   onAction,
 }: {
   schedule: ScheduleData;
-  onAction: () => void;
+  onAction?: () => void;
 }) {
   const { publicKey } = useWallet();
   const [showChart, setShowChart] = useState(false);
@@ -83,7 +84,7 @@ export default function ScheduleCard({
   const kindStyle = KIND_BADGE[schedule.kind] ?? "bg-zinc-500/10 text-zinc-400 border border-zinc-500/20";
 
   return (
-    <div className="card p-5 flex flex-col gap-3">
+    <div className="card p-5 flex flex-col gap-3" data-tour="schedule-card">
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
@@ -273,21 +274,35 @@ export default function ScheduleCard({
       </div>
 
       {/* Actions */}
-      {publicKey && !schedule.revoked && (
+      {!schedule.revoked && (
         <div className="flex flex-col sm:flex-row gap-2 mt-1">
           {isBeneficiary && claimableAmt > 0n && (
-            <button onClick={() => setShowClaimModal(true)} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate">
-              <span className="sm:hidden">Claim {stroopsToXlm(claimableAmt)} XLM</span>
-              <span className="hidden sm:inline">Claim {stroopsToXlm(claimableAmt)} XLM{xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}</span>
-            </button>
+            <WalletConnectionGuard
+              onAction={() => setShowClaimModal(true)}
+              actionName="claim tokens"
+            >
+              {({ onClick }) => (
+                <button onClick={onClick} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate">
+                  <span className="sm:hidden">Claim {stroopsToXlm(claimableAmt)} XLM</span>
+                  <span className="hidden sm:inline">Claim {stroopsToXlm(claimableAmt)} XLM{xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}</span>
+                </button>
+              )}
+            </WalletConnectionGuard>
           )}
           {isGrantor && schedule.revocable && progress < 100 && (
-            <button
-              onClick={() => setShowRevokeModal(true)}
-              className="text-xs rounded-lg px-3 py-1.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors"
+            <WalletConnectionGuard
+              onAction={() => setShowRevokeModal(true)}
+              actionName="revoke schedule"
             >
-              Revoke
-            </button>
+              {({ onClick }) => (
+                <button
+                  onClick={onClick}
+                  className="text-xs rounded-lg px-3 py-1.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors"
+                >
+                  Revoke
+                </button>
+              )}
+            </WalletConnectionGuard>
           )}
           {isBeneficiary && !schedule.revoked && (
             <button
@@ -306,7 +321,7 @@ export default function ScheduleCard({
         tokenSymbol={tokenSymbol}
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
-        onSuccess={() => { setShowClaimModal(false); onAction(); }}
+        onSuccess={() => { setShowClaimModal(false); onAction?.(); }}
       />
       <RevokeModal
         schedule={schedule}
@@ -314,13 +329,13 @@ export default function ScheduleCard({
         tokenSymbol={tokenSymbol}
         open={showRevokeModal}
         onClose={() => setShowRevokeModal(false)}
-        onSuccess={() => { setShowRevokeModal(false); onAction(); }}
+        onSuccess={() => { setShowRevokeModal(false); onAction?.(); }}
       />
       <TransferBeneficiaryModal
         schedule={schedule}
         open={showTransferModal}
         onClose={() => setShowTransferModal(false)}
-        onSuccess={() => { setShowTransferModal(false); onAction(); }}
+        onSuccess={() => { setShowTransferModal(false); onAction?.(); }}
       />
     </div>
   );

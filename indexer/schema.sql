@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS schedule_events (
     'proposal_acknowledged',
     'proposal_activated',
     'proposal_expired',
+    'stream_set',
+    'given',
+    'collected',
     'unknown'
   )),
 
@@ -109,6 +112,94 @@ CREATE TABLE IF NOT EXISTS tvl_stats (
   total_value_locked     TEXT NOT NULL,
   active_schedules       INTEGER NOT NULL,
   last_updated           INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- ── Drips indexed state ────────────────────────────────────────────────
+-- These tables hold the current state projected by the Drips event
+-- indexer. They intentionally model state (rather than an event log) so
+-- list and stream queries remain inexpensive as the event history grows.
+CREATE TABLE IF NOT EXISTS drips_lists (
+  id                         TEXT PRIMARY KEY,
+  name                       TEXT NOT NULL,
+  owner                      TEXT NOT NULL,
+  token                      TEXT NOT NULL,
+  total_funding_rate_per_sec TEXT NOT NULL DEFAULT '0',
+  target_rate_per_sec        TEXT NOT NULL DEFAULT '0',
+  created_at                 INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_drips_lists_owner_created
+  ON drips_lists (owner, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS drips_list_members (
+  list_id   TEXT NOT NULL REFERENCES drips_lists(id) ON DELETE CASCADE,
+  address   TEXT NOT NULL,
+  joined_at INTEGER NOT NULL,
+  left_at   INTEGER,
+  PRIMARY KEY (list_id, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_drips_list_members_current
+  ON drips_list_members (list_id, left_at, joined_at ASC, address ASC);
+
+-- `ended_at` is populated when a stream is closed. An elapsed estimated end
+-- time also makes a stream inactive even if an end event has not arrived yet.
+CREATE TABLE IF NOT EXISTS drips_streams (
+  id                 TEXT PRIMARY KEY,
+  account            TEXT NOT NULL,
+  receiver           TEXT NOT NULL,
+  token              TEXT NOT NULL,
+  rate_per_second    TEXT NOT NULL,
+  estimated_end_time INTEGER,
+  ended_at           INTEGER,
+  created_at         INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_drips_streams_active_account
+  ON drips_streams (account, ended_at, estimated_end_time, created_at DESC, id DESC);
+
+-- Current streaming balances are keyed by account and token. A zero balance
+-- is retained so the projection can be updated idempotently by the indexer.
+CREATE TABLE IF NOT EXISTS drips_streaming_balances (
+  account    TEXT NOT NULL,
+  token      TEXT NOT NULL,
+  balance    TEXT NOT NULL DEFAULT '0',
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (account, token)
+);
+
+CREATE INDEX IF NOT EXISTS idx_drips_streaming_balances_token
+  ON drips_streaming_balances (token);
+
+CREATE TABLE IF NOT EXISTS current_streams (
+  account        TEXT NOT NULL,
+  token          TEXT NOT NULL,
+  receivers_json TEXT NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  PRIMARY KEY (account, token)
+);
+
+CREATE TABLE IF NOT EXISTS gives (
+  id             TEXT PRIMARY KEY,
+  sender         TEXT NOT NULL,
+  receiver       TEXT NOT NULL,
+  token          TEXT NOT NULL,
+  amount_stroops TEXT NOT NULL,
+  ledger         INTEGER NOT NULL,
+  timestamp      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
+  ON gives (sender, timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
+  ON gives (receiver, timestamp DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS collected_totals (
+  account                  TEXT NOT NULL,
+  token                    TEXT NOT NULL,
+  total_collected_stroops  TEXT NOT NULL DEFAULT '0',
+  updated_at               INTEGER NOT NULL,
+  PRIMARY KEY (account, token)
 );
 
 -- Notification subscriptions

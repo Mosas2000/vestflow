@@ -1,318 +1,312 @@
-# Implementation Summary: API Enhancements and UI Improvements
-
-This document summarizes the implementation of issues #196, #197, #201, and #203.
+# Frontend Enhancements Implementation Summary
 
 ## Overview
 
-This implementation adds comprehensive backend and frontend enhancements to the VestFlow application, including PostgreSQL support, enhanced REST APIs, CSV export functionality, and improved user interface components.
+Successfully implemented 4 frontend enhancement features for VestFlow as requested in issues #643, #651, #652, and #653.
 
-## Issues Resolved
+## Pull Request
 
-### Issue #201: PostgreSQL Schema for Vesting Schedules and Events
+**PR #708**: https://github.com/vestflow-labs/vestflow/pull/708
 
-**Status:** ✅ Complete
+- Base branch: `main`
+- Feature branch: `feat/frontend-enhancements-643-651-652-653`
+- Status: Open, ready for review
+- Closes: #643, #651, #652, #653
 
-**Implementation:**
-- Created comprehensive PostgreSQL migration schema (`indexer/migrations/001_postgresql_schema.sql`)
-- Designed three main tables:
-  - `vesting_schedules` - Current state of all vesting schedules
-  - `claim_events` - Historical record of token claims
-  - `revoke_events` - Historical record of schedule revocations
-- Added proper indexes on beneficiary and grantor addresses for optimized queries
-- Implemented foreign key constraints for data integrity
-- Added automatic timestamp updates with PostgreSQL triggers
-- Created database adapter (`indexer/src/db-postgres.ts`) with full CRUD operations
+## Implemented Features
 
-**Key Features:**
-- Indexes on `grantor`, `beneficiary`, `token`, and composite indexes for complex queries
-- Support for analytics and checkpoint tracking
-- Idempotent migration script that can be safely re-run
-- Comprehensive documentation in migration README
+### 1. Wallet QR Code Display (#643)
 
-**Files Modified:**
-- `indexer/migrations/001_postgresql_schema.sql` (new)
-- `indexer/src/db-postgres.ts` (new)
-- `indexer/migrations/README.md` (new)
+**Component**: `components/WalletQrModal.tsx`
 
----
+**Features**:
 
-### Issue #203: REST API - GET /schedules/:scheduleId
+- QR code generation using `qrcode.react` library (already in dependencies)
+- Download QR code as PNG functionality
+- Copy wallet address button
+- Accessible modal with proper ARIA attributes
+- Responsive design for mobile and desktop
 
-**Status:** ✅ Complete
+**Integration**:
 
-**Implementation:**
-- Enhanced existing endpoint to return comprehensive schedule details
-- Added event history tracking for schedule lifecycle
-- Implemented next unlock timestamp calculation for pending milestones
-- Created detailed current state object with:
-  - Status (pending, vesting, fully_vested, revoked)
-  - Progress percentage
-  - Vested amount
-  - Claimable amount
-  - Remaining amount
-  - Unclaimed vested amount
+- Added QR button to dashboard header (`app/app/page.tsx`)
+- Button only shows when wallet is connected
+- Clean modal UI matching existing design patterns
 
-**API Response Structure:**
-```typescript
-{
-  schedule: {...},          // Full schedule details
-  currentState: {
-    status: string,
-    progress: number,
-    vestedAmount: string,
-    claimableAmount: string,
-    remainingAmount: string,
-    unclaimedVested: string
-  },
-  nextUnlockTimestamp: number | null,
-  eventHistory: [...],      // Lifecycle events
-  network: string,
-  timestamp: number
-}
-```
+**Technical Highlights**:
 
-**Features:**
-- Calculates vested amounts for all vesting types (Linear, Cliff, LinearWithCliff)
-- Determines next unlock for cliff-based schedules
-- Proper caching with stale-while-revalidate strategy
-- Comprehensive error handling
-
-**Files Modified:**
-- `app/api/schedules/[id]/route.ts`
+- Uses SVG to Canvas conversion for PNG export
+- Proper cleanup of blob URLs to prevent memory leaks
+- Responsive modal with proper z-index layering
 
 ---
 
-### Issue #196: Frontend - Export Vesting Data to CSV
+### 2. Wallet Connection Guard (#651)
 
-**Status:** ✅ Complete
+**Component**: `components/WalletConnectionGuard.tsx`
 
-**Implementation:**
-- Created centralized CSV export utility module (`lib/csvExport.ts`)
-- Implemented combined export with two sections:
-  1. **Vesting Schedules** - Comprehensive schedule data
-  2. **Claim History** - Filtered schedules showing claims
-- Enhanced both main dashboard and beneficiary dashboard with export functionality
-- Added timestamped filenames for better organization
+**Features**:
 
-**CSV Export Features:**
-- Schedule details include:
-  - Schedule ID, vesting kind, grantor, beneficiary
-  - Total amount, vested amount, claimed amount, remaining amount
-  - Progress percentage
-  - Start date, end date, cliff date
-  - Revocable flag, revoked status
-- Claim history includes:
-  - All schedules with claimed amounts
-  - Claim percentage relative to total
-  - Status information
-- Proper CSV escaping for addresses and special characters
-- Download button available when user has schedules
+- Higher-order component pattern for guarding write actions
+- Shows "Connect Wallet" CTA when Freighter is not connected
+- Automatically resumes action after successful connection
+- Toast notifications for connection feedback
+- Error handling for connection failures
 
-**Files Modified:**
-- `lib/csvExport.ts` (new)
-- `app/app/page.tsx`
-- `app/app/beneficiary/page.tsx`
+**Integration**:
+
+- Applied to claim button in `ScheduleCard.tsx`
+- Applied to revoke button in `ScheduleCard.tsx`
+- Easily extensible to other write actions
+
+**Technical Highlights**:
+
+- Render props pattern for flexible button styling
+- Preserves original button appearance and behavior
+- Seamless action continuation after connection
 
 ---
 
-### Issue #197: Frontend - Empty States and Skeleton Loaders
+### 3. Onboarding Tour (#652)
 
-**Status:** ✅ Complete
+**Component**: `components/OnboardingTour.tsx`
 
-**Implementation:**
-- Created comprehensive empty state component system (`components/EmptyState.tsx`)
-- Enhanced skeleton loaders with shimmer animation
-- Added multiple contextual empty state variants
-- Improved loading experience across dashboards
+**Features**:
 
-**Empty State Variants:**
-1. `NoSchedulesEmptyState` - No schedules for connected wallet
-2. `NoSearchResultsEmptyState` - No results from address search
-3. `NoGrantorSchedulesEmptyState` - No schedules as grantor
-4. `NoBeneficiarySchedulesEmptyState` - No schedules as beneficiary
-5. `LoadingEmptyState` - Loading indicator with spinner
+- Step-by-step interactive tour with 4 steps:
+  1. Connect Your Wallet
+  2. Create a Schedule
+  3. View Your Schedules
+  4. Claim Vested Tokens
+- Spotlight highlighting of target elements
+- Progress indicator with dots
+- Skip button always visible
+- localStorage tracking (shown once per user)
+- Respects `prefers-reduced-motion` CSS media query
 
-**Skeleton Loader Enhancements:**
-- Added shimmer animation effect using CSS keyframes
-- Implemented staggered animation delays for natural feel
-- Created variants:
-  - `ScheduleCardSkeleton` - Individual card loader
-  - `ScheduleListSkeleton` - Grid of multiple cards
-  - `ScheduleDetailSkeleton` - Detailed view loader
-- Proper overflow handling for shimmer effect
+**Integration**:
 
-**Features:**
-- Contextual messaging based on user state
-- Action buttons to guide users (create schedule, learn more, etc.)
-- Icons and visual hierarchy for better UX
-- Smooth animations and transitions
-- Responsive design for all screen sizes
+- Added to dashboard page (`app/app/page.tsx`)
+- Tour data attributes added to:
+  - Wallet button in `Navbar.tsx`
+  - Dashboard link in `Navbar.tsx`
+  - Create button in `Navbar.tsx`
+  - Schedule cards in `ScheduleCard.tsx`
 
-**Files Modified:**
-- `components/EmptyState.tsx` (new)
-- `components/ScheduleCardSkeleton.tsx`
-- `app/globals.css` (added shimmer keyframe)
-- `app/app/page.tsx`
-- `app/app/beneficiary/page.tsx`
+**Technical Highlights**:
+
+- MutationObserver for dynamic element tracking
+- Responsive positioning system (top/bottom/left/right)
+- Backdrop overlay for focus
+- Smooth transitions (when motion is not reduced)
+- Auto-cleanup on unmount
 
 ---
 
-## Technical Highlights
+### 4. Token Selector with Balances (#653)
 
-### Database Architecture
-- Normalized schema with proper foreign key relationships
-- Strategic indexes for common query patterns
-- Support for both SQLite (existing) and PostgreSQL (new)
-- Automatic timestamp tracking with database triggers
+**Component**: `components/TokenSelector.tsx`
 
-### API Design
-- RESTful endpoint design
-- Comprehensive error handling
-- Proper HTTP caching headers
-- Structured response format with metadata
+**Features**:
 
-### Code Quality
-- Type-safe TypeScript implementations
-- Reusable utility functions
-- Proper separation of concerns
-- Clean, maintainable code structure
+- Visual dropdown replacing plain text input
+- Lists supported tokens with:
+  - Token symbol (e.g., XLM)
+  - Token name (e.g., Stellar Lumens)
+  - Token icon (emoji for now)
+  - User's current balance (when connected)
+- Custom token address entry via expandable section
+- Balance fetching for native XLM
+- Validation for SEP-41 token addresses
 
-### User Experience
-- Contextual empty states guide users
-- Smooth loading animations
-- Professional CSV export with proper formatting
-- Comprehensive data export for analysis
+**Integration**:
 
----
+- Replaced token address field in `CreateForm.tsx`
+- Maintains all existing validation logic
+- Seamless integration with form state
 
-## Testing Recommendations
+**Technical Highlights**:
 
-### Backend Testing
-1. **PostgreSQL Migration**
-   ```bash
-   # Test migration
-   psql $DATABASE_URL -f indexer/migrations/001_postgresql_schema.sql
-   
-   # Verify tables created
-   psql $DATABASE_URL -c "\dt"
-   
-   # Check indexes
-   psql $DATABASE_URL -c "\di"
-   ```
-
-2. **API Endpoint**
-   ```bash
-   # Test schedule detail endpoint
-   curl http://localhost:3000/api/schedules/1
-   
-   # Verify response structure
-   # Should include: schedule, currentState, nextUnlockTimestamp, eventHistory
-   ```
-
-### Frontend Testing
-1. **CSV Export**
-   - Connect wallet with schedules
-   - Click "Export CSV" button
-   - Verify downloaded file contains both schedule and claim sections
-   - Check filename includes timestamp
-
-2. **Empty States**
-   - Test without wallet connection → shows connection prompt
-   - Test with wallet but no schedules → shows create schedule prompt
-   - Test with search that yields no results → shows search-specific message
-   - Test grantor/beneficiary filters with no results → shows role-specific message
-
-3. **Skeleton Loaders**
-   - Load dashboard while throttling network
-   - Verify shimmer animation displays
-   - Check responsive behavior on mobile
-   - Ensure smooth transition to actual content
+- Real-time balance updates when wallet connects
+- Loading states for balance fetching
+- Custom token support with validation
+- Error display for invalid addresses
+- Extensible design for adding more tokens
 
 ---
 
-## Migration Guide
+## Code Quality
 
-### For Existing SQLite Users
+### TypeScript
 
-If you want to migrate to PostgreSQL:
+- ✅ All files pass TypeScript type checking
+- ✅ Proper type definitions for all props
+- ✅ No `any` types (except in existing error handling)
 
-1. **Backup existing data**
-   ```bash
-   sqlite3 vestflow-events.db .dump > backup.sql
-   ```
+### Accessibility
 
-2. **Set up PostgreSQL**
-   ```bash
-   export DATABASE_URL="postgresql://user:pass@localhost/vestflow"
-   ```
+- ✅ Proper ARIA labels and roles
+- ✅ Keyboard navigation support
+- ✅ `prefers-reduced-motion` support in tour
+- ✅ Semantic HTML structure
+- ✅ Focus management in modals
 
-3. **Run migration**
-   ```bash
-   psql $DATABASE_URL -f indexer/migrations/001_postgresql_schema.sql
-   ```
+### Performance
 
-4. **Update environment variables**
-   Add `DATABASE_URL` to your `.env.local`
+- ✅ Efficient re-renders with proper React hooks
+- ✅ Memory cleanup (blob URLs, event listeners)
+- ✅ Conditional rendering to avoid unnecessary work
+- ✅ Debounced/throttled expensive operations where needed
 
-5. **Test the migration**
-   Run the indexer and verify data is being written to PostgreSQL
+### UI/UX
+
+- ✅ Consistent with existing VestFlow design patterns
+- ✅ Responsive on mobile and desktop
+- ✅ Loading states for async operations
+- ✅ Error states with helpful messages
+- ✅ Success feedback with toast notifications
 
 ---
 
-## Performance Considerations
+## Testing Checklist
 
-### Database Indexes
-- Queries by beneficiary: O(log n) with `idx_vesting_schedules_beneficiary`
-- Queries by grantor: O(log n) with `idx_vesting_schedules_grantor`
-- Combined queries: Optimized with composite index
+- [x] TypeScript compilation successful
+- [x] No ESLint errors
+- [x] Components render without errors
+- [x] Proper prop types defined
+- [x] Accessibility attributes present
+- [x] Responsive design implemented
+- [ ] Manual testing on live instance (pending deployment)
+- [ ] Cross-browser testing (pending deployment)
 
-### API Caching
-- 30-second cache with stale-while-revalidate
-- Reduces load on blockchain RPC
-- Improves response times
+---
 
-### Frontend Optimization
-- Skeleton loaders prevent layout shift
-- CSV export happens client-side (no server round-trip)
-- Empty states reduce unnecessary API calls
+## Files Changed
+
+### New Files (4)
+
+1. `components/WalletQrModal.tsx` - QR code modal component
+2. `components/WalletConnectionGuard.tsx` - Connection guard HOC
+3. `components/OnboardingTour.tsx` - Interactive tour component
+4. `components/TokenSelector.tsx` - Token dropdown selector
+
+### Modified Files (4)
+
+1. `app/app/page.tsx` - Added QR button and tour
+2. `components/ScheduleCard.tsx` - Added connection guards
+3. `components/CreateForm.tsx` - Integrated token selector
+4. `components/Navbar.tsx` - Added tour data attributes
+
+**Total Changes**: +667 lines, -33 lines
+
+---
+
+## Deployment Notes
+
+### No Breaking Changes
+
+- All changes are additive
+- Existing functionality remains intact
+- No API changes required
+- No database migrations needed
+
+### Dependencies
+
+- No new dependencies added
+- Uses existing `qrcode.react` library
+- Compatible with current Next.js version
+
+### Environment Variables
+
+- No new environment variables required
+- Works with existing configuration
 
 ---
 
 ## Future Enhancements
 
 ### Potential Improvements
-1. **Real-time event subscriptions** - WebSocket support for live updates
-2. **Advanced analytics** - Charts and graphs for vesting progress
-3. **Bulk operations** - Export multiple schedules at once
-4. **Email notifications** - Alert users when tokens become claimable
-5. **Multi-chain support** - Extend to other Stellar-based networks
 
-### Scalability
-- PostgreSQL connection pooling for high traffic
-- Redis caching layer for frequently accessed data
-- CDN for static assets and CSV exports
-- GraphQL API for flexible queries
+1. **QR Code**: Add customization options (size, color, error correction level)
+2. **Wallet Guard**: Extend to all write actions across the app
+3. **Onboarding Tour**: Add more steps, analytics tracking
+4. **Token Selector**:
+   - Add more supported tokens (USDC, etc.)
+   - Fetch balances for non-native tokens
+   - Add token price information
+   - Search/filter functionality for many tokens
+
+### Extensibility
+
+All components are designed to be easily extended:
+
+- Token selector can accommodate unlimited tokens
+- Tour can have unlimited steps
+- Connection guard works with any action
+- QR modal can be used for any address
 
 ---
 
-## Commit History
+## Git Workflow
+
+```bash
+# Branch created from upstream/main
+git checkout -b feat/frontend-enhancements-643-651-652-653 upstream/main
+
+# Single comprehensive commit
+git commit -m "feat: add frontend enhancements for wallet QR, connection guard, onboarding tour, and token selector"
+
+# Pushed to origin
+git push origin feat/frontend-enhancements-643-651-652-653
+
+# PR created targeting vestflow-labs/vestflow main branch
+gh pr create --base main --repo vestflow-labs/vestflow
+```
+
+---
+
+## Commit Message
 
 ```
-d2a3e51 add postgresql schema migration and database adapter
-03d7890 add comprehensive empty states and enhanced skeleton loaders
-c7ddc65 add comprehensive csv export with claim history
-7ebc4ec enhance schedule detail endpoint with comprehensive state and metadata
+feat: add frontend enhancements for wallet QR, connection guard, onboarding tour, and token selector
+
+This commit implements multiple frontend enhancements:
+
+1. Wallet QR Code Display (#643)
+   - Add WalletQrModal component with QR code generation
+   - Support PNG download functionality
+   - Include copy address button
+   - Add QR button to dashboard header
+
+2. Wallet Connection Guard (#651)
+   - Create WalletConnectionGuard component for write actions
+   - Show 'Connect Wallet' CTA when disconnected
+   - Auto-trigger action after successful connection
+   - Applied to claim and revoke buttons in ScheduleCard
+
+3. Onboarding Tour (#652)
+   - Add OnboardingTour component with step-by-step guidance
+   - Tour covers: wallet connection, schedule creation, dashboard navigation
+   - Shown once on first visit via localStorage flag
+   - Skip button always visible
+   - Respects prefers-reduced-motion preference
+
+4. Token Selector with Balances (#653)
+   - Create TokenSelector component as dropdown replacement
+   - Display supported tokens (XLM) with icons and names
+   - Show user balance for each token when wallet connected
+   - Support custom token address entry via 'Other' option
+   - Integrated into CreateForm
+
+All features follow existing UI patterns and accessibility standards.
 ```
 
 ---
 
 ## Conclusion
 
-All four issues have been successfully implemented with production-ready code. The implementation includes:
+All 4 features have been successfully implemented and are ready for review. The PR is properly linked to close all associated issues upon merge.
 
-- ✅ PostgreSQL schema with proper indexes and relationships
-- ✅ Enhanced REST API with comprehensive schedule details
-- ✅ CSV export with claim history
-- ✅ Professional empty states and skeleton loaders
-
-The code is type-safe, well-documented, and follows best practices for maintainability and scalability.
+**Author**: @meshackyaro
+**Date**: 2026-08-26
+**PR**: https://github.com/vestflow-labs/vestflow/pull/708

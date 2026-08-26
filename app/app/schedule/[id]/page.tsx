@@ -9,6 +9,7 @@ import ClaimModal from "@/components/ClaimModal";
 import TransferBeneficiaryModal from "@/components/TransferBeneficiaryModal";
 import AddressLabel from "@/components/AddressLabel";
 import BeneficiaryQrModal from "@/components/BeneficiaryQrModal";
+import CopyLinkButton from "@/components/CopyLinkButton";
 import {
   getSchedule,
   getClaimableAtTimestamp,
@@ -18,7 +19,9 @@ import {
   vestingProgress,
   formatDate,
   formatCliffDate,
+  pauseSchedule,
   revokeSchedule,
+  resumeSchedule,
   parseContractError,
   truncate,
   NETWORK,
@@ -36,7 +39,7 @@ export default function ScheduleDetailPage() {
   const { addRecentlyViewed } = useRecentlyViewed();
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | null>(null);
+  const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | "pause" | "resume" | null>(null);
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showBeneficiaryQr, setShowBeneficiaryQr] = useState(false);
   const [err, setErr] = useState("");
@@ -115,6 +118,64 @@ export default function ScheduleDetailPage() {
     finally { setActionLoading(null); }
   };
 
+  const handlePause = async () => {
+    if (!publicKey || !schedule) return;
+    const confirmed = window.confirm("Pause this schedule? Vesting stops advancing until you resume it.");
+    if (!confirmed) return;
+    setActionLoading("pause"); setErr(""); setLastTxHash(null);
+    const toastId = addToast({
+      status: "pending",
+      title: "Pause pending…",
+      message: "Waiting for transaction to confirm.",
+    });
+    try {
+      const hash = await pauseSchedule(publicKey, schedule.id);
+      setLastTxHash(hash);
+      updateToast(toastId, {
+        status: "success",
+        title: "Schedule paused",
+        message: "Vesting progress is frozen until resumed.",
+        txHash: hash,
+        network: NETWORK,
+      });
+      await load();
+    } catch (e: any) {
+      const msg = parseContractError(e);
+      setErr(msg);
+      updateToast(toastId, { status: "error", title: "Pause failed", message: msg });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!publicKey || !schedule) return;
+    setActionLoading("resume"); setErr(""); setLastTxHash(null);
+    const toastId = addToast({
+      status: "pending",
+      title: "Resume pending…",
+      message: "Waiting for transaction to confirm.",
+    });
+    try {
+      const hash = await resumeSchedule(publicKey, schedule.id);
+      setLastTxHash(hash);
+      updateToast(toastId, {
+        status: "success",
+        title: "Schedule resumed",
+        message: "Vesting progress is advancing again.",
+        txHash: hash,
+        network: NETWORK,
+      });
+      await load();
+    } catch (e: any) {
+      const msg = parseContractError(e);
+      setErr(msg);
+      updateToast(toastId, { status: "error", title: "Resume failed", message: msg });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handlePreviewDate = async (date: string) => {
     setPreviewDate(date);
     if (!date || !schedule) { setPreviewAmount(null); return; }
@@ -183,10 +244,12 @@ export default function ScheduleDetailPage() {
 
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
+    : schedule.paused
+    ? "bg-yellow-500/10 text-yellow-400"
     : progress >= 100
     ? "bg-green-500/10 text-green-400"
     : "bg-violet-500/10 text-violet-400";
-  const statusLabel = schedule.revoked ? "Revoked" : progress >= 100 ? "Fully Vested" : "Vesting";
+  const statusLabel = schedule.revoked ? "Revoked" : schedule.paused ? "Paused" : progress >= 100 ? "Fully Vested" : "Vesting";
 
   return (
     <>
@@ -198,16 +261,19 @@ export default function ScheduleDetailPage() {
 
         <div className="card p-6 flex flex-col gap-6">
           {/* Header */}
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between flex-wrap gap-3">
             <div>
               <h1 className="text-2xl font-bold">Schedule #{schedule.id}</h1>
               <p className="text-zinc-400 mt-1 text-sm">
                 {schedule.kind} vesting{schedule.revocable ? " · revocable" : ""}
               </p>
             </div>
-            <span className={`text-sm font-medium px-3 py-1 rounded-full ${statusColor}`}>
-              {statusLabel}
-            </span>
+            <div className="flex items-center gap-2">
+              <CopyLinkButton label="Copy Link" />
+              <span className={`text-sm font-medium px-3 py-1 rounded-full ${statusColor}`}>
+                {statusLabel}
+              </span>
+            </div>
           </div>
 
           {/* Vesting Curve — always visible on the detail page */}
@@ -218,6 +284,11 @@ export default function ScheduleDetailPage() {
 
           {/* Progress bar — dual layer: vested + claimed */}
           <div>
+            {schedule.paused && (
+              <div className="mb-3 rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-300">
+                This stream is paused. Balances remain claimable, but no additional amount vests until it is resumed.
+              </div>
+            )}
             <div className="flex justify-between text-sm text-zinc-400 mb-2">
               <div className="flex items-center gap-3 text-xs">
                 <span className="flex items-center gap-1">
@@ -404,6 +475,24 @@ export default function ScheduleDetailPage() {
                   className="rounded-xl px-5 py-2.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors text-sm disabled:opacity-60"
                 >
                   {actionLoading === "revoke" ? "Processing…" : "Revoke Schedule"}
+                </button>
+              )}
+              {isGrantor && progress < 100 && !schedule.paused && (
+                <button
+                  onClick={handlePause}
+                  disabled={!!actionLoading}
+                  className="rounded-xl px-5 py-2.5 border border-yellow-500/30 text-yellow-300 hover:border-yellow-500/60 transition-colors text-sm disabled:opacity-60"
+                >
+                  {actionLoading === "pause" ? "Processing…" : "Pause Stream"}
+                </button>
+              )}
+              {isGrantor && schedule.paused && (
+                <button
+                  onClick={handleResume}
+                  disabled={!!actionLoading}
+                  className="rounded-xl px-5 py-2.5 border border-emerald-500/30 text-emerald-300 hover:border-emerald-500/60 transition-colors text-sm disabled:opacity-60"
+                >
+                  {actionLoading === "resume" ? "Processing…" : "Resume Stream"}
                 </button>
               )}
               {isGrantor && (

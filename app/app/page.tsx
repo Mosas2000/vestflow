@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import Navbar from "@/components/Navbar";
 import ScheduleCard from "@/components/ScheduleCard";
 import RecentlyViewedSchedules from "@/components/RecentlyViewedSchedules";
+import SearchFilterBar from "@/components/SearchFilterBar";
+import { matchesAddressOrToken } from "@/lib/tokens";
 import { ScheduleListSkeleton } from "@/components/ScheduleCardSkeleton";
 import {
   NoSchedulesEmptyState,
@@ -20,6 +22,7 @@ import {
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
+  NETWORK,
   stroopsToXlm,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
@@ -29,6 +32,8 @@ import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import Link from "next/link";
 
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
+import WalletQrModal from "@/components/WalletQrModal";
+import OnboardingTour from "@/components/OnboardingTour";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
@@ -42,6 +47,35 @@ interface DashboardStats {
   claimableNow: bigint;
   totalVested: bigint;
   activeSchedules: number;
+}
+
+interface IndexedEvent {
+  id: string;
+  event_type: string;
+  ledger: number;
+  ledger_closed_at: string;
+  grantor?: string | null;
+  beneficiary?: string | null;
+  amount?: string | null;
+  token?: string | null;
+}
+
+interface StreamTokenSummary {
+  token: string;
+  dripped: bigint;
+  received: bigint;
+}
+
+function tokenLabel(token: string): string {
+  if (token === NATIVE_TOKEN) return "XLM";
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function formatAmount(value: bigint): string {
+  return Number(stroopsToXlm(value)).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  });
 }
 
 // ── Animated stats bar (#94) ──────────────────────────────────────────────────
@@ -127,6 +161,160 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   );
 }
 
+function StreamsAnalyticsSummary({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
+  const [summaries, setSummaries] = useState<StreamTokenSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/events?address=${publicKey}&network=${NETWORK}&limit=200`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("events unavailable")))
+      .then((data) => {
+        if (cancelled) return;
+        const byToken = new Map<string, StreamTokenSummary>();
+        for (const event of (data.events ?? []) as IndexedEvent[]) {
+          if (event.event_type !== "given" && event.event_type !== "collected") continue;
+          const token = event.token ?? NATIVE_TOKEN;
+          const amount = BigInt(event.amount ?? "0");
+          const current = byToken.get(token) ?? { token, dripped: 0n, received: 0n };
+          if (event.event_type === "given") {
+            if (event.grantor === publicKey) current.dripped += amount;
+            if (event.beneficiary === publicKey) current.received += amount;
+          }
+          if (event.event_type === "collected" && event.beneficiary === publicKey) {
+            current.received += amount;
+          }
+          byToken.set(token, current);
+        }
+        setSummaries([...byToken.values()].sort((a, b) => tokenLabel(a.token).localeCompare(tokenLabel(b.token))));
+      })
+      .catch(() => {
+        if (!cancelled) setSummaries([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, refreshKey]);
+
+  if (loading) {
+    return (
+      <div className="card p-4 mb-6">
+        <p className="text-sm text-zinc-400">Loading stream analytics...</p>
+      </div>
+    );
+  }
+
+  if (summaries.length === 0) return null;
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">Streams Analytics</h2>
+          <p className="text-sm text-zinc-500">All-time dripped and received totals by token</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {summaries.map((summary) => {
+          const net = summary.received - summary.dripped;
+          const netPositive = net >= 0n;
+          return (
+            <div key={summary.token} className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs text-zinc-500 mb-3 font-mono">{tokenLabel(summary.token)}</p>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between gap-3">
+                  <span className="text-zinc-500">Dripped</span>
+                  <span className="text-red-300 tabular-nums">{formatAmount(summary.dripped)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-zinc-500">Received</span>
+                  <span className="text-emerald-300 tabular-nums">{formatAmount(summary.received)}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-t border-white/10 pt-2">
+                  <span className="text-zinc-400">Net</span>
+                  <span className={`tabular-nums font-semibold ${netPositive ? "text-emerald-300" : "text-red-300"}`}>
+                    {netPositive ? "+" : "-"}{formatAmount(netPositive ? net : -net)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RecentGives({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
+  const [gives, setGives] = useState<IndexedEvent[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/events?address=${publicKey}&event_type=given&network=${NETWORK}&limit=50`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("gives unavailable")))
+      .then((data) => {
+        if (cancelled) return;
+        const sorted = ((data.events ?? []) as IndexedEvent[])
+          .filter((event) => event.event_type === "given")
+          .sort((a, b) => b.ledger - a.ledger)
+          .slice(0, 5);
+        setGives(sorted);
+      })
+      .catch(() => {
+        if (!cancelled) setGives([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, refreshKey]);
+
+  if (gives.length === 0) return null;
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">Recent Gives</h2>
+          <p className="text-sm text-zinc-500">Latest one-time gives sent or received</p>
+        </div>
+        <Link href="/app/history" className="text-sm text-violet-300 hover:text-violet-200 transition-colors">
+          See all
+        </Link>
+      </div>
+      <div className="divide-y divide-white/10">
+        {gives.map((give) => {
+          const sent = give.grantor === publicKey;
+          const counterparty = sent ? give.beneficiary : give.grantor;
+          return (
+            <div key={give.id} className="flex items-center justify-between gap-3 py-3 text-sm">
+              <div className="min-w-0">
+                <p className={`font-medium ${sent ? "text-red-300" : "text-emerald-300"}`}>
+                  {sent ? "Sent" : "Received"} {formatAmount(BigInt(give.amount ?? "0"))} {tokenLabel(give.token ?? NATIVE_TOKEN)}
+                </p>
+                {counterparty && (
+                  <Link
+                    href={`/app/profile/${encodeURIComponent(counterparty)}`}
+                    className="font-mono text-xs text-zinc-500 hover:text-violet-300 transition-colors"
+                  >
+                    {counterparty.slice(0, 10)}...{counterparty.slice(-6)}
+                  </Link>
+                )}
+              </div>
+              <time className="text-xs text-zinc-500 whitespace-nowrap" dateTime={give.ledger_closed_at}>
+                {new Date(give.ledger_closed_at).toLocaleDateString()}
+              </time>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function RpcErrorBanner({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div
@@ -169,6 +357,8 @@ export default function DashboardPage() {
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const load = async () => {
     setLoading(true);
@@ -234,6 +424,7 @@ export default function DashboardPage() {
       }
     } finally {
       setLoading(false);
+      setRefreshKey((value) => value + 1);
     }
   };
 
@@ -321,16 +512,17 @@ export default function DashboardPage() {
     return list;
   }, [multiFiltered, sortBy]);
 
-  // Apply address search on top of sorted list
+  // Apply address prefix and token search on top of sorted list (Issue #647)
   const q = query.trim().toLowerCase();
   const searchFiltered = useMemo(() => {
     if (!q) return sortedSchedules;
-    return sortedSchedules.filter(
-      s =>
-        s.grantor.toLowerCase().includes(q) ||
-        s.beneficiary.toLowerCase().includes(q) ||
-        (getLabel(s.grantor) ?? "").toLowerCase().includes(q) ||
-        (getLabel(s.beneficiary) ?? "").toLowerCase().includes(q)
+    return sortedSchedules.filter(s =>
+      matchesAddressOrToken(
+        q,
+        [s.grantor, s.beneficiary],
+        [s.token],
+        [getLabel(s.grantor), getLabel(s.beneficiary)]
+      )
     );
   }, [sortedSchedules, q, getLabel]);
 
@@ -372,6 +564,18 @@ export default function DashboardPage() {
             <p className="text-zinc-400 mt-1">Your active vesting schedules</p>
           </div>
           <div className="flex gap-3 flex-wrap items-center">
+            {publicKey && (
+              <button
+                onClick={() => setShowQrModal(true)}
+                className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-2 transition-colors flex items-center gap-1.5"
+                aria-label="Show wallet QR code"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                </svg>
+                Wallet QR
+              </button>
+            )}
             <button
               onClick={load}
               disabled={loading}
@@ -395,6 +599,8 @@ export default function DashboardPage() {
 
         {/* Summary stats — animated count-up (#270) */}
         {publicKey && stats && <AnimatedStats stats={stats} />}
+        {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}
 
         {/* Recently viewed schedules (#416) */}
         {publicKey && <RecentlyViewedSchedules schedules={recentSchedules} />}
@@ -544,25 +750,15 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Address search input */}
-        <div className="relative mb-6">
-          <input
-            type="text"
+        {/* Search / filter bar (Issue #647) */}
+        <div className="mb-6">
+          <SearchFilterBar
             value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search by address or label…"
-            className="input pr-8"
-            aria-label="Search schedules by address or label"
+            onChange={setQuery}
+            placeholder="Filter streams by address prefix or token symbol…"
+            resultCount={searchFiltered.length}
+            totalCount={multiFiltered.length}
           />
-          {query && (
-            <button
-              onClick={() => setQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition-colors"
-              aria-label="Clear search"
-            >
-              ×
-            </button>
-          )}
         </div>
 
         {/* Schedule grid */}
@@ -629,6 +825,18 @@ export default function DashboardPage() {
           </>
         )}
       </main>
+
+      {/* QR Code Modal */}
+      {publicKey && (
+        <WalletQrModal
+          address={publicKey}
+          open={showQrModal}
+          onClose={() => setShowQrModal(false)}
+        />
+      )}
+
+      {/* Onboarding Tour */}
+      <OnboardingTour />
     </>
   );
 }

@@ -46,6 +46,7 @@ export default function Navbar() {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [networkTooltipOpen, setNetworkTooltipOpen] = useState(false);
 
   // Tracks whether we've already synced `theme` from localStorage, so the
   // very first run of the effect below doesn't briefly re-apply the
@@ -96,6 +97,13 @@ export default function Navbar() {
   }, [dropdownOpen]);
 
   useEffect(() => {
+    if (!networkTooltipOpen) return;
+    const handleClose = () => setNetworkTooltipOpen(false);
+    window.addEventListener("click", handleClose);
+    return () => window.removeEventListener("click", handleClose);
+  }, [networkTooltipOpen]);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -116,11 +124,12 @@ export default function Navbar() {
 
       {/* Desktop nav links */}
       <div className="hidden md:flex items-center gap-8 text-sm text-zinc-400">
-        <Link href="/app" className="hover:text-white transition-colors">Dashboard</Link>
+        <Link href="/app" data-tour="dashboard-link" className="hover:text-white transition-colors">Dashboard</Link>
         <Link href="/app/portfolio" className="hover:text-white transition-colors">Portfolio</Link>
         <Link href="/app/history" className="hover:text-white transition-colors">History</Link>
         <Link href="/app/beneficiary" className="hover:text-white transition-colors">Beneficiary</Link>
-        <Link href="/app/create" className="hover:text-white transition-colors">New Schedule</Link>
+        <Link href="/app/create" data-tour="create-button" className="hover:text-white transition-colors">New Schedule</Link>
+        <Link href="/lists" className="hover:text-white transition-colors">Lists</Link>
         <Link href="/analytics" className="hover:text-white transition-colors">Analytics</Link>
         <Link href="/widget" className="hover:text-white transition-colors">Widget</Link>
         <Link href="/learn" className="hover:text-white transition-colors">Learn</Link>
@@ -147,14 +156,32 @@ export default function Navbar() {
         >
           <SearchIcon />
         </button>
-        <span
-          title={NETWORK === "mainnet" ? "Connected to Stellar Mainnet" : "Connected to Stellar Testnet — funds are not real"}
-          aria-label={NETWORK === "mainnet" ? "Network: Mainnet" : "Network: Testnet"}
-          className={`hidden sm:inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium select-none ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}
-        >
-          <span className={`inline-block w-1.5 h-1.5 rounded-full ${NETWORK === "mainnet" ? "bg-green-400" : "bg-yellow-400 animate-pulse"}`} aria-hidden="true" />
-          {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
-        </span>
+        <div className="relative hidden sm:block">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setNetworkTooltipOpen((v) => !v);
+            }}
+            aria-label={NETWORK === "mainnet" ? "Network: Mainnet" : "Network: Testnet"}
+            aria-expanded={networkTooltipOpen}
+            className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium select-none ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}
+          >
+            <span className={`inline-block w-1.5 h-1.5 rounded-full ${NETWORK === "mainnet" ? "bg-green-400" : "bg-yellow-400 animate-pulse"}`} aria-hidden="true" />
+            {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
+          </button>
+          {networkTooltipOpen && (
+            <div
+              role="tooltip"
+              onClick={(e) => e.stopPropagation()}
+              className="absolute right-0 mt-2 w-64 rounded-lg border border-white/10 bg-[#0c0d14]/95 p-3 text-xs text-zinc-300 shadow-2xl"
+            >
+              {NETWORK === "mainnet"
+                ? "Mainnet uses real Stellar assets and production contract state."
+                : "Testnet uses test assets for development and QA. Balances have no real value."}
+            </div>
+          )}
+        </div>
         <div className="relative">
           <button
             onClick={(e) => {
@@ -243,17 +270,35 @@ export default function Navbar() {
           )}
         </button>
 
-        <WalletButton />
+        <div data-tour="wallet-button">
+          <WalletButton />
+        </div>
 
         {/* Network badge inline on mobile */}
-        <span
-          title={NETWORK === "mainnet" ? "Stellar Mainnet" : "Stellar Testnet"}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setNetworkTooltipOpen((v) => !v);
+          }}
           aria-label={NETWORK === "mainnet" ? "Network: Mainnet" : "Network: Testnet"}
+          aria-expanded={networkTooltipOpen}
           className={`sm:hidden inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium select-none ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}
         >
           <span className={`inline-block w-1.5 h-1.5 rounded-full ${NETWORK === "mainnet" ? "bg-green-400" : "bg-yellow-400 animate-pulse"}`} aria-hidden="true" />
           {NETWORK === "mainnet" ? "Main" : "Test"}
-        </span>
+        </button>
+        {networkTooltipOpen && (
+          <div
+            role="tooltip"
+            onClick={(e) => e.stopPropagation()}
+            className="absolute right-4 top-full mt-2 w-64 rounded-lg border border-white/10 bg-[#0c0d14]/95 p-3 text-xs text-zinc-300 shadow-2xl sm:hidden"
+          >
+            {NETWORK === "mainnet"
+              ? "Mainnet uses real Stellar assets and production contract state."
+              : "Testnet uses test assets for development and QA. Balances have no real value."}
+          </div>
+        )}
       </div>
 
       {/* Mobile menu */}

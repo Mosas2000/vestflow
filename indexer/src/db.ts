@@ -57,7 +57,7 @@ function migrateEventTypeCheck(db: Database.Database): void {
       `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'`
     )
     .get() as { sql: string } | undefined;
-  if (!row?.sql || row.sql.includes("proposal_created")) {
+  if (!row?.sql || row.sql.includes("stream_set")) {
     return;
   }
 
@@ -74,6 +74,9 @@ function migrateEventTypeCheck(db: Database.Database): void {
           'proposal_acknowledged',
           'proposal_activated',
           'proposal_expired',
+          'stream_set',
+          'given',
+          'collected',
           'unknown'
         )),
         ledger INTEGER NOT NULL,
@@ -85,6 +88,11 @@ function migrateEventTypeCheck(db: Database.Database): void {
         amount TEXT,
         token TEXT,
         created_amount TEXT,
+        start_time INTEGER,
+        duration INTEGER,
+        cliff_duration INTEGER,
+        vesting_kind TEXT,
+        materialized_at INTEGER,
         raw_topics TEXT NOT NULL,
         raw_value TEXT NOT NULL,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -93,11 +101,13 @@ function migrateEventTypeCheck(db: Database.Database): void {
     db.exec(`
       INSERT INTO schedule_events_new (
         id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+        grantor, beneficiary, amount, token, created_amount, start_time, duration,
+        cliff_duration, vesting_kind, materialized_at, raw_topics, raw_value, created_at
       )
       SELECT
         id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+        grantor, beneficiary, amount, token, created_amount, start_time, duration,
+        cliff_duration, vesting_kind, materialized_at, raw_topics, raw_value, created_at
       FROM schedule_events;
     `);
     db.exec("DROP TABLE schedule_events");
@@ -109,6 +119,7 @@ function migrateEventTypeCheck(db: Database.Database): void {
     db.exec("CREATE INDEX IF NOT EXISTS idx_event_type ON schedule_events (event_type)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_ledger ON schedule_events (ledger)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)");
     db.exec("COMMIT");
   } catch (err) {
     db.exec("ROLLBACK");
@@ -209,9 +220,39 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     ensureColumn(db, "schedule_events", "cliff_duration", "cliff_duration INTEGER");
     ensureColumn(db, "schedule_events", "vesting_kind", "vesting_kind TEXT");
     ensureColumn(db, "schedule_events", "materialized_at", "materialized_at INTEGER");
+    ensureColumn(db, "drips_lists", "target_rate_per_sec", "target_rate_per_sec TEXT NOT NULL DEFAULT '0'");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS current_streams (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        receivers_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account, token)
+      );
+      CREATE TABLE IF NOT EXISTS gives (
+        id TEXT PRIMARY KEY,
+        sender TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        token TEXT NOT NULL,
+        amount_stroops TEXT NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
+        ON gives (sender, timestamp DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
+        ON gives (receiver, timestamp DESC, id DESC);
+      CREATE TABLE IF NOT EXISTS collected_totals (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        total_collected_stroops TEXT NOT NULL DEFAULT '0',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account, token)
+      );
+    `);
     migrateEventTypeCheck(db);
     ensureEventDedupIndex(db);
     dbs.set(network, db);
@@ -256,6 +297,49 @@ export interface InsertEventRow {
   raw_value: string;
 }
 
+function eventTimestamp(row: InsertEventRow): number {
+  const parsed = Date.parse(row.ledger_closed_at);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : Math.floor(Date.now() / 1000);
+}
+
+function applyEventProjection(db: Database.Database, row: InsertEventRow): void {
+  const timestamp = eventTimestamp(row);
+
+  if (row.event_type === "stream_set" && row.grantor && row.token) {
+    db.prepare(
+      `INSERT INTO current_streams (account, token, receivers_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(account, token) DO UPDATE SET
+         receivers_json = excluded.receivers_json,
+         updated_at = excluded.updated_at`
+    ).run(row.grantor, row.token, row.raw_value, timestamp);
+    return;
+  }
+
+  if (row.event_type === "given" && row.grantor && row.beneficiary && row.token && row.amount) {
+    db.prepare(
+      `INSERT OR IGNORE INTO gives
+        (id, sender, receiver, token, amount_stroops, ledger, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(row.id, row.grantor, row.beneficiary, row.token, row.amount, row.ledger, timestamp);
+    return;
+  }
+
+  if (row.event_type === "collected" && row.beneficiary && row.token && row.amount) {
+    const existing = db.prepare(
+      "SELECT total_collected_stroops FROM collected_totals WHERE account = ? AND token = ?"
+    ).get(row.beneficiary, row.token) as { total_collected_stroops: string } | undefined;
+    const nextTotal = (BigInt(existing?.total_collected_stroops ?? "0") + BigInt(row.amount)).toString();
+    db.prepare(
+      `INSERT INTO collected_totals (account, token, total_collected_stroops, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(account, token) DO UPDATE SET
+         total_collected_stroops = excluded.total_collected_stroops,
+         updated_at = excluded.updated_at`
+    ).run(row.beneficiary, row.token, nextTotal, timestamp);
+  }
+}
+
 /**
  * Inserts an event row with enhanced idempotency.
  * Returns true if a new row was written, false if it already existed.
@@ -276,8 +360,9 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
       .prepare(
         `INSERT OR IGNORE INTO schedule_events
           (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-           grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           grantor, beneficiary, amount, token, created_amount,
+           start_time, duration, cliff_duration, vesting_kind, raw_topics, raw_value)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         row.id,
@@ -291,11 +376,19 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
         row.amount,
         row.token,
         row.created_amount,
+        row.start_time ?? null,
+        row.duration ?? null,
+        row.cliff_duration ?? null,
+        row.vesting_kind ?? null,
         row.raw_topics,
         row.raw_value
       );
     
-    return result.changes > 0;
+    if (result.changes > 0) {
+      applyEventProjection(db, row);
+      return true;
+    }
+    return false;
   } catch (error) {
     // Handle unique constraint violations (from the dedup index)
     if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
@@ -355,6 +448,7 @@ export function insertEventsBatch(events: InsertEventRow[], network?: NetworkNam
         );
         
         if (result.changes > 0) {
+          applyEventProjection(db, row);
           insertedCount++;
         }
       } catch (error) {
@@ -676,6 +770,219 @@ export function getTvlStats(network = parseNetwork(undefined)): TvlStats {
     total_value_locked: total.toString(),
     last_updated: Math.max(...rows.map((row) => row.last_updated)),
   };
+}
+
+// ── Drips indexed state queries ───────────────────────────────────────
+
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+export interface DripsList {
+  id: string;
+  name: string;
+  owner: string;
+  member_count: number;
+  total_funding_rate_per_sec: string;
+  target_rate_per_sec: string;
+  token: string;
+}
+
+export interface DripsListMember {
+  address: string;
+  joined_at: number;
+}
+
+export interface DripsStream {
+  receiver: string;
+  token: string;
+  rate_per_second: string;
+  estimated_end_time: number | null;
+}
+
+interface DripsCursor {
+  createdAt?: number;
+  joinedAt?: number;
+  id?: string;
+  address?: string;
+}
+
+function encodeDripsCursor(cursor: DripsCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeDripsCursor(cursor?: string): DripsCursor | null {
+  if (!cursor) return {};
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as DripsCursor;
+    if (!value || typeof value !== "object") return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function boundedPageSize(limit?: number): number {
+  return Math.min(Math.max(limit ?? 50, 1), 200);
+}
+
+export function queryDripsLists(params: {
+  owner?: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsList> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (cursor === null || (params.cursor && (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))) {
+    return null;
+  }
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  if (params.owner) {
+    conditions.push("l.owner = ?");
+    values.push(params.owner);
+  }
+  if (params.cursor) {
+    conditions.push("(l.created_at < ? OR (l.created_at = ? AND l.id < ?))");
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network).prepare(
+    `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec, l.created_at,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     ${where}
+     GROUP BY l.id
+     ORDER BY l.created_at DESC, l.id DESC
+     LIMIT ?`
+  ).all(...values, limit + 1) as (DripsList & { created_at: number })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ created_at: _createdAt, ...list }) => list),
+    nextCursor: hasMore && last ? encodeDripsCursor({ createdAt: last.created_at, id: last.id }) : null,
+  };
+}
+
+export function queryDripsListMembers(params: {
+  listId: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsListMember> | "not_found" | null {
+  const db = getDb(params.network);
+  if (!db.prepare("SELECT 1 FROM drips_lists WHERE id = ?").get(params.listId)) return "not_found";
+  const cursor = decodeDripsCursor(params.cursor);
+  if (cursor === null || (params.cursor && (typeof cursor.joinedAt !== "number" || typeof cursor.address !== "string"))) return null;
+  const values: unknown[] = [params.listId];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (joined_at > ? OR (joined_at = ? AND address > ?))";
+    values.push(cursor.joinedAt, cursor.joinedAt, cursor.address);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = db.prepare(
+    `SELECT address, joined_at FROM drips_list_members
+     WHERE list_id = ? AND left_at IS NULL ${after}
+     ORDER BY joined_at ASC, address ASC LIMIT ?`
+  ).all(...values, limit + 1) as DripsListMember[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return { items: page, nextCursor: hasMore && last ? encodeDripsCursor({ joinedAt: last.joined_at, address: last.address }) : null };
+}
+
+export function queryDripsStreams(params: {
+  account: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsStream> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (cursor === null || (params.cursor && (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const values: unknown[] = [params.account, now];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (created_at < ? OR (created_at = ? AND id < ?))";
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network).prepare(
+    `SELECT id, receiver, token, rate_per_second, estimated_end_time, created_at
+     FROM drips_streams
+     WHERE account = ? AND ended_at IS NULL
+       AND (estimated_end_time IS NULL OR estimated_end_time > ?) ${after}
+     ORDER BY created_at DESC, id DESC LIMIT ?`
+  ).all(...values, limit + 1) as (DripsStream & { id: string; created_at: number })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ id: _id, created_at: _createdAt, ...stream }) => stream),
+    nextCursor: hasMore && last ? encodeDripsCursor({ createdAt: last.created_at, id: last.id }) : null,
+  };
+}
+
+export function getDripsStreamingTvl(token: string, network?: NetworkName): string {
+  const rows = getDb(network).prepare(
+    "SELECT balance FROM drips_streaming_balances WHERE token = ?"
+  ).all(token) as { balance: string }[];
+  return rows.reduce((sum, row) => sum + BigInt(row.balance), 0n).toString();
+}
+
+export function getCurrentStream(account: string, token: string, network?: NetworkName): {
+  account: string;
+  token: string;
+  receivers_json: string;
+  updated_at: number;
+} | null {
+  const row = getDb(network).prepare(
+    "SELECT account, token, receivers_json, updated_at FROM current_streams WHERE account = ? AND token = ?"
+  ).get(account, token) as {
+    account: string;
+    token: string;
+    receivers_json: string;
+    updated_at: number;
+  } | undefined;
+  return row ?? null;
+}
+
+export function queryGivesForAccount(account: string, network?: NetworkName): Array<{
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount_stroops: string;
+  ledger: number;
+  timestamp: number;
+}> {
+  return getDb(network).prepare(
+    `SELECT id, sender, receiver, token, amount_stroops, ledger, timestamp
+     FROM gives
+     WHERE sender = ? OR receiver = ?
+     ORDER BY timestamp DESC, id DESC`
+  ).all(account, account) as Array<{
+    id: string;
+    sender: string;
+    receiver: string;
+    token: string;
+    amount_stroops: string;
+    ledger: number;
+    timestamp: number;
+  }>;
+}
+
+export function getCollectedTotal(account: string, token: string, network?: NetworkName): string {
+  const row = getDb(network).prepare(
+    "SELECT total_collected_stroops FROM collected_totals WHERE account = ? AND token = ?"
+  ).get(account, token) as { total_collected_stroops: string } | undefined;
+  return row?.total_collected_stroops ?? "0";
 }
 
 /**
@@ -1416,95 +1723,47 @@ export function getLastGapDetection(network?: NetworkName): GapDetectionLogEntry
   return row || null;
 }
 
-// ── Give Events ───────────────────────────────────────────────────────────
 
-import type { GiveEvent, GiveQueryParams } from "./types";
+export function queryDripsList(params: {
+  listId: string;
+  network?: NetworkName;
+}): DripsList | "not_found" {
+  const db = getDb(params.network);
+  const row = db.prepare(
+    `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     WHERE l.id = ?
+     GROUP BY l.id`
+  ).get(params.listId) as DripsList | undefined;
 
-export interface InsertGiveRow {
-  id: string;
-  sender: string;
-  receiver: string;
-  token: string;
-  amount: string;
-  timestamp: number;
-  ledger: number;
-  raw_topics: string;
-  raw_value: string;
+  if (!row) return "not_found";
+  return row;
 }
 
-/**
- * Insert a give event row. Returns true if a new row was written, false for
- * duplicates (idempotent — safe to call multiple times with the same id).
- */
-export function insertGive(row: InsertGiveRow, network?: NetworkName): boolean {
-  const result = getDb(network)
-    .prepare(
-      `INSERT OR IGNORE INTO gives
-         (id, sender, receiver, token, amount, timestamp, ledger, raw_topics, raw_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      row.id,
-      row.sender,
-      row.receiver,
-      row.token,
-      row.amount,
-      row.timestamp,
-      row.ledger,
-      row.raw_topics,
-      row.raw_value,
-    );
-  return result.changes > 0;
-}
-
-/**
- * Query give events with optional filters.
- * Results ordered by timestamp DESC (newest first).
- * Supports cursor-based pagination via the `cursor` param (last seen id).
- */
-export function queryGives(params: GiveQueryParams): GiveEvent[] {
-  const conditions: string[] = [];
-  const values: unknown[] = [];
-
-  if (params.sender) {
-    conditions.push("sender = ?");
-    values.push(params.sender);
+export function updateDripsListTargetRate(params: {
+  listId: string;
+  owner?: string;
+  targetRatePerSec: string;
+  network?: NetworkName;
+}): { success: boolean; list?: DripsList; error?: string } {
+  const db = getDb(params.network);
+  const existing = queryDripsList({ listId: params.listId, network: params.network });
+  if (existing === "not_found") {
+    return { success: false, error: "List not found" };
   }
-  if (params.receiver) {
-    conditions.push("receiver = ?");
-    values.push(params.receiver);
-  }
-  if (params.token) {
-    conditions.push("token = ?");
-    values.push(params.token);
-  }
-  if (params.from) {
-    const fromTs = Math.floor(new Date(params.from).getTime() / 1000);
-    conditions.push("timestamp >= ?");
-    values.push(fromTs);
-  }
-  if (params.to) {
-    const toTs = Math.floor(new Date(params.to).getTime() / 1000);
-    conditions.push("timestamp <= ?");
-    values.push(toTs);
-  }
-  if (params.cursor) {
-    // Cursor is the id of the last item on the previous page.
-    // Because rows are ordered by (timestamp DESC, id ASC) we need events
-    // that come after the cursor in that sort order.
-    const cursorRow = getDb(params.network)
-      .prepare("SELECT timestamp, id FROM gives WHERE id = ?")
-      .get(params.cursor) as { timestamp: number; id: string } | undefined;
-    if (cursorRow) {
-      conditions.push("(timestamp < ? OR (timestamp = ? AND id > ?))");
-      values.push(cursorRow.timestamp, cursorRow.timestamp, cursorRow.id);
-    }
+  if (params.owner && existing.owner !== params.owner) {
+    return { success: false, error: "Only the list owner can update the target rate" };
   }
 
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const limit = Math.min(params.limit ?? 20, 100);
+  db.prepare("UPDATE drips_lists SET target_rate_per_sec = ? WHERE id = ?")
+    .run(params.targetRatePerSec, params.listId);
 
-  return getDb(params.network)
-    .prepare(`SELECT * FROM gives ${where} ORDER BY timestamp DESC, id ASC LIMIT ?`)
-    .all(...values, limit) as GiveEvent[];
+  const updated = queryDripsList({ listId: params.listId, network: params.network });
+  return {
+    success: true,
+    list: updated === "not_found" ? undefined : updated,
+  };
 }
