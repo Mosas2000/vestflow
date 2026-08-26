@@ -2,6 +2,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useToast } from "@/components/Toast";
 import InfoTooltip from "@/components/InfoTooltip";
+import TokenSelector from "@/components/TokenSelector";
 import {
   createSchedule,
   CONTRACT_ID,
@@ -625,26 +626,14 @@ export default function CreateForm() {
         />
       </Field>
 
-      <Field
-        label="Token Address (SEP-41)"
-        htmlFor="tokenAddress"
+      <TokenSelector
+        value={form.tokenAddress}
+        onChange={(address, symbol) => {
+          set("tokenAddress", address);
+          touch("tokenAddress");
+        }}
         error={visibleErrors.tokenAddress}
-        hint="The contract address of the token to vest. Defaults to native XLM."
-      >
-        <input
-          id="tokenAddress"
-          type="text"
-          placeholder="CDLZ…"
-          value={form.tokenAddress}
-          onChange={(e) => set("tokenAddress", e.target.value)}
-          onBlur={() => touch("tokenAddress")}
-          required
-          autoComplete="off"
-          spellCheck={false}
-          aria-invalid={!!visibleErrors.tokenAddress}
-          className={`input ${visibleErrors.tokenAddress ? "border-red-500/60 focus:border-red-500" : ""}`}
-        />
-      </Field>
+      />
 
       <Field
         label={`Total Amount (${tokenLabel})`}
