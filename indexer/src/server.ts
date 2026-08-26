@@ -303,6 +303,52 @@ function handleAnalyticsGrantorSummary(res: http.ServerResponse, address: string
   }
 }
 
+function handleGives(res: http.ServerResponse, searchParams: URLSearchParams): void {
+  // Validate address-like params (Stellar public keys are 56 chars, uppercase)
+  const sender = searchParams.get("sender") ?? undefined;
+  const receiver = searchParams.get("receiver") ?? undefined;
+  const token = searchParams.get("token") ?? undefined;
+
+  if (sender && !/^[A-Z0-9]{56}$/.test(sender)) {
+    return json(res, 400, { error: "Invalid sender address" });
+  }
+  if (receiver && !/^[A-Z0-9]{56}$/.test(receiver)) {
+    return json(res, 400, { error: "Invalid receiver address" });
+  }
+
+  const fromRaw = searchParams.get("from") ?? undefined;
+  const toRaw = searchParams.get("to") ?? undefined;
+
+  if (fromRaw && isNaN(new Date(fromRaw).getTime())) {
+    return json(res, 400, { error: "Invalid from date" });
+  }
+  if (toRaw && isNaN(new Date(toRaw).getTime())) {
+    return json(res, 400, { error: "Invalid to date" });
+  }
+
+  const limitRaw = numParam(searchParams, "limit");
+  if (limitRaw !== undefined && (!Number.isInteger(limitRaw) || limitRaw < 1 || limitRaw > 100)) {
+    return json(res, 400, { error: "limit must be an integer between 1 and 100" });
+  }
+
+  try {
+    const params: GiveQueryParams = {
+      sender,
+      receiver,
+      token: token ?? undefined,
+      from: fromRaw,
+      to: toRaw,
+      limit: limitRaw,
+      cursor: searchParams.get("cursor") ?? undefined,
+    };
+    const gives = queryGives(params);
+    return json(res, 200, { gives, count: gives.length });
+  } catch (error) {
+    console.error("[server] Gives query error:", error);
+    return json(res, 500, { error: "Query failed" });
+  }
+}
+
 export function createServer(): http.Server {
   return http.createServer(async (req, res) => {
     let url: URL;
@@ -365,6 +411,8 @@ export function createServer(): http.Server {
       case "/analytics/tvl":
         return handleAnalyticsTvl(res, url.searchParams);
 
+      case "/gives":
+        return handleGives(res, url.searchParams);
       case "/analytics/streams/tvl":
         return handleStreamsTvl(res, url.searchParams);
 
