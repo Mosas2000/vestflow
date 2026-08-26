@@ -14,6 +14,7 @@ import {
   getWalletXlmBalance,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
+import { useXlmPrice } from "@/lib/price";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -171,6 +172,71 @@ function SummaryItem({
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+// ─── Stream Rate Calculator (#633) ────────────────────────────────────────────
+
+function StreamRateCalculator({
+  amountXlm,
+  durationDays,
+}: {
+  amountXlm: string;
+  durationDays: string;
+}) {
+  const xlmPrice = useXlmPrice();
+
+  const amt = parseFloat(amountXlm);
+  const dur = parseInt(durationDays);
+
+  if (!amountXlm || !durationDays || isNaN(amt) || isNaN(dur) || amt <= 0 || dur < 1) {
+    return (
+      <div className="rounded-xl border border-white/8 bg-white/[0.02] p-4">
+        <p className="text-xs uppercase tracking-wider text-zinc-500 mb-3 font-semibold">
+          Stream Rate Breakdown
+        </p>
+        <p className="text-sm text-zinc-600">Enter an amount and duration to see the cost breakdown.</p>
+      </div>
+    );
+  }
+
+  const perDay = amt / dur;
+  const perWeek = perDay * 7;
+  const perMonth = perDay * 30;
+
+  const fmtXlm = (v: number) =>
+    v.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 7 });
+
+  const fmtUsd = (xlm: number) =>
+    xlmPrice !== null
+      ? ` ≈ $${(xlm * xlmPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : "";
+
+  return (
+    <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
+      <p className="text-xs uppercase tracking-wider text-violet-400 mb-3 font-semibold">
+        Stream Rate Breakdown
+      </p>
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        {[
+          { label: "Per Day", value: perDay },
+          { label: "Per Week", value: perWeek },
+          { label: "Per Month (30d)", value: perMonth },
+        ].map(({ label, value }) => (
+          <div key={label} className="flex flex-col gap-0.5">
+            <span className="text-[11px] text-zinc-500">{label}</span>
+            <span className="font-semibold tabular-nums text-zinc-200">
+              {fmtXlm(value)} XLM
+            </span>
+            {xlmPrice !== null && (
+              <span className="text-[11px] text-zinc-500 tabular-nums">
+                {fmtUsd(value)}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -708,6 +774,8 @@ export default function CreateForm() {
           className={`input ${visibleErrors.durationDays ? "border-red-500/60 focus:border-red-500" : ""}`}
         />
       </Field>
+
+      <StreamRateCalculator amountXlm={form.amount} durationDays={form.durationDays} />
 
       <fieldset className="flex flex-col gap-3 border-0 p-0 m-0">
         <legend className="text-sm text-zinc-400">Vesting Type</legend>

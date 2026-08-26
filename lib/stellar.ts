@@ -470,6 +470,30 @@ export async function revokeSchedule(publicKey: string, scheduleId: number): Pro
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
 
+export async function topUpSchedule(
+  publicKey: string,
+  scheduleId: number,
+  amountXlm: string,
+): Promise<string> {
+  const amountStroops = xlmToStroops(amountXlm);
+  return buildAndSend(publicKey, "top_up", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(amountStroops, { type: "i128" }),
+  ]);
+}
+
+export async function withdrawSchedule(
+  publicKey: string,
+  scheduleId: number,
+  amountXlm: string,
+): Promise<string> {
+  const amountStroops = xlmToStroops(amountXlm);
+  return buildAndSend(publicKey, "withdraw", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(amountStroops, { type: "i128" }),
+  ]);
+}
+
 export async function pauseSchedule(publicKey: string, scheduleId: number): Promise<string> {
   return buildAndSend(publicKey, "pause_schedule", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
