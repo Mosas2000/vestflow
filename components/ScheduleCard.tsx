@@ -15,6 +15,7 @@ import CopyButton from "@/components/CopyButton";
 import ClaimModal from "@/components/ClaimModal";
 import RevokeModal from "@/components/RevokeModal";
 import TransferBeneficiaryModal from "@/components/TransferBeneficiaryModal";
+import { SqueezeModal } from "@/components/SqueezeModal";
 import VestingChart from "@/components/VestingChart";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
@@ -33,6 +34,7 @@ export default function ScheduleCard({
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showRevokeModal, setShowRevokeModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showSqueezeModal, setShowSqueezeModal] = useState(false);
   const xlmPrice = useXlmPrice();
 
   const now = Math.floor(Date.now() / 1000);
@@ -312,6 +314,21 @@ export default function ScheduleCard({
               Transfer
             </button>
           )}
+          {isBeneficiary && !schedule.revoked && progress > 0 && progress < 100 && (
+            <WalletConnectionGuard
+              onAction={() => setShowSqueezeModal(true)}
+              actionName="squeeze stream"
+            >
+              {({ onClick }) => (
+                <button
+                  onClick={onClick}
+                  className="text-xs rounded-lg px-3 py-1.5 border border-emerald-500/30 text-emerald-400 hover:border-emerald-500/60 transition-colors"
+                >
+                  Squeeze
+                </button>
+              )}
+            </WalletConnectionGuard>
+          )}
         </div>
       )}
 
@@ -337,6 +354,14 @@ export default function ScheduleCard({
         onClose={() => setShowTransferModal(false)}
         onSuccess={() => { setShowTransferModal(false); onAction?.(); }}
       />
+      {showSqueezeModal && publicKey && (
+        <SqueezeModal
+          schedule={schedule}
+          publicKey={publicKey}
+          onClose={() => setShowSqueezeModal(false)}
+          onSuccess={() => { setShowSqueezeModal(false); onAction?.(); }}
+        />
+      )}
     </div>
   );
 }
