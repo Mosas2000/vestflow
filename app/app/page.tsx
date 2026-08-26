@@ -288,6 +288,8 @@ function OutgoingStreamsList({
           const daysLeft = Math.floor(secsLeft / 86400);
           const isNative = s.token === NATIVE_TOKEN;
           const tokenSym = isNative ? "XLM" : `${s.token.slice(0, 5)}…`;
+          const isBeneficiary = s.beneficiary === publicKey;
+          const claimable = claimableMap.get(s.id) ?? 0n;
 
           return (
             <div key={s.id} className="flex items-start justify-between gap-4 py-4 text-sm">
@@ -340,6 +342,15 @@ function OutgoingStreamsList({
                 >
                   Stop
                 </button>
+                {isBeneficiary && claimable > 0n && (
+                  <button
+                    onClick={() => {
+                      // TODO: implement collect call
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex items-center gap-2">
+                    Collect {stroopsToXlm(claimable)} XLM
+                  </button>
+                )}
               </div>
             </div>
           );
