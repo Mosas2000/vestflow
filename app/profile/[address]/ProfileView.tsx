@@ -7,7 +7,7 @@ import ScheduleCard from "@/components/ScheduleCard";
 import CopyLinkButton from "@/components/CopyLinkButton";
 import AddressLabel from "@/components/AddressLabel";
 import SearchFilterBar from "@/components/SearchFilterBar";
-import { NoSearchResultsEmptyState } from "@/components/EmptyState";
+import EmptyState, { NoSearchResultsEmptyState } from "@/components/EmptyState";
 import { ScheduleListSkeleton } from "@/components/ScheduleCardSkeleton";
 import {
   getGrantorScheduleIds,
@@ -19,8 +19,38 @@ import {
   truncate,
   NETWORK,
 } from "@/lib/stellar";
-import { matchesAddressOrToken } from "@/lib/tokens";
+import { getTokenSymbol, matchesAddressOrToken } from "@/lib/tokens";
 import { useAddressBook } from "@/hooks/useAddressBook";
+
+interface ProfileSupplementalData {
+  outgoing_streams: Array<{
+    receiver: string;
+    token: string;
+    rate_per_second: string;
+    estimated_end_time: number | null;
+  }>;
+  drips_lists: Array<{
+    id: string;
+    name: string;
+    token: string;
+    member_count: number;
+    total_funding_rate_per_sec: string;
+  }>;
+  gives: {
+    records: Array<{
+      id: string;
+      sender: string;
+      receiver: string;
+      token: string;
+      amount_stroops: string;
+      timestamp: number;
+    }>;
+  };
+}
+
+interface SplitsData {
+  receivers: Array<{ receiver: string; weight_bps: number }>;
+}
 
 interface ProfileViewProps {
   address: string;
@@ -32,6 +62,9 @@ export default function ProfileView({ address }: ProfileViewProps) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"all" | "grantor" | "beneficiary">("all");
   const [query, setQuery] = useState("");
+  const [supplemental, setSupplemental] = useState<ProfileSupplementalData | null>(null);
+  const [splits, setSplits] = useState<SplitsData>({ receivers: [] });
+  const [activityLoading, setActivityLoading] = useState(true);
 
   useEffect(() => {
     let mounted = true;
@@ -56,6 +89,24 @@ export default function ProfileView({ address }: ProfileViewProps) {
       }
     }
     load();
+    return () => { mounted = false; };
+  }, [address]);
+
+  useEffect(() => {
+    let mounted = true;
+    setActivityLoading(true);
+    Promise.all([
+      fetch(`/api/profile/${encodeURIComponent(address)}`).then(response => response.ok ? response.json() : null),
+      fetch(`/api/splits?account=${encodeURIComponent(address)}`).then(response => response.ok ? response.json() : { receivers: [] }),
+    ]).then(([profile, splitConfig]) => {
+      if (!mounted) return;
+      setSupplemental(profile);
+      setSplits(splitConfig);
+    }).catch(() => {
+      if (mounted) setSupplemental(null);
+    }).finally(() => {
+      if (mounted) setActivityLoading(false);
+    });
     return () => { mounted = false; };
   }, [address]);
 
@@ -94,6 +145,11 @@ export default function ProfileView({ address }: ProfileViewProps) {
   }, [tabFiltered, query, getLabel]);
 
   const customLabel = getLabel(address);
+  const gives = supplemental?.gives.records ?? [];
+  const outgoingStreams = supplemental?.outgoing_streams ?? [];
+  const ownedLists = supplemental?.drips_lists ?? [];
+  const hasActivity = schedules.length > 0 || splits.receivers.length > 0 ||
+    gives.length > 0 || outgoingStreams.length > 0 || ownedLists.length > 0;
 
   return (
     <>
@@ -183,6 +239,12 @@ export default function ProfileView({ address }: ProfileViewProps) {
         {/* Stream List */}
         {loading ? (
           <ScheduleListSkeleton count={4} />
+        ) : !activityLoading && !hasActivity ? (
+          <EmptyState
+            icon="🌱"
+            title="No activity yet"
+            description="This account has no vesting schedules, streams, splits, gives, or Drips lists."
+          />
         ) : searchFiltered.length === 0 ? (
           query ? (
             <NoSearchResultsEmptyState
@@ -203,6 +265,60 @@ export default function ProfileView({ address }: ProfileViewProps) {
                
               />
             ))}
+          </div>
+        )}
+
+        {!activityLoading && hasActivity && (
+          <div className="mt-10 space-y-6">
+            <section className="card p-6">
+              <h2 className="text-lg font-semibold text-white mb-4">Splits configuration</h2>
+              {splits.receivers.length === 0 ? (
+                <p className="text-sm text-zinc-500">No splits configured.</p>
+              ) : (
+                <div className="space-y-2">
+                  {splits.receivers.map(receiver => (
+                    <div key={receiver.receiver} className="flex items-center justify-between gap-4 border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                      <AddressLabel address={receiver.receiver} />
+                      <span className="text-sm font-mono text-violet-300">{(receiver.weight_bps / 100).toFixed(2)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {(outgoingStreams.length > 0 || gives.length > 0) && (
+              <section className="card p-6">
+                <h2 className="text-lg font-semibold text-white mb-4">Drips activity</h2>
+                <div className="space-y-3">
+                  {outgoingStreams.map((stream, index) => (
+                    <div key={`${stream.receiver}-${stream.token}-${index}`} className="flex items-center justify-between gap-4 text-sm">
+                      <span className="text-zinc-400">Streaming to <AddressLabel address={stream.receiver} compact /></span>
+                      <span className="font-mono text-emerald-300">{stroopsToXlm(BigInt(stream.rate_per_second))} {getTokenSymbol(stream.token)}/s</span>
+                    </div>
+                  ))}
+                  {gives.map(give => (
+                    <div key={give.id} className="flex items-center justify-between gap-4 text-sm border-t border-white/5 pt-3">
+                      <span className="text-zinc-400">{give.sender === address ? "Gave to" : "Received from"} <AddressLabel address={give.sender === address ? give.receiver : give.sender} compact /></span>
+                      <span className="font-mono text-white">{stroopsToXlm(BigInt(give.amount_stroops))} {getTokenSymbol(give.token)}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {ownedLists.length > 0 && (
+              <section className="card p-6">
+                <h2 className="text-lg font-semibold text-white mb-4">Owned Drips lists</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {ownedLists.map(list => (
+                    <Link key={list.id} href={`/lists/${encodeURIComponent(list.id)}`} className="border border-white/10 rounded-lg p-4 hover:border-violet-500/40 transition-colors">
+                      <p className="font-semibold text-white">{list.name}</p>
+                      <p className="text-xs text-zinc-500 mt-1">{list.member_count} members · {getTokenSymbol(list.token)}</p>
+                    </Link>
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
         )}
       </main>

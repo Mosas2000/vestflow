@@ -323,6 +323,40 @@ export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[
   return schedules.filter(Boolean) as ScheduleData[];
 }
 
+export interface DripsStreamData {
+  funder: string;
+  list_id: number;
+  member: string;
+  token: string;
+  amt_per_sec: bigint;
+  start_time: number;
+}
+
+export async function getDripsStream(
+  listId: number,
+  member: string,
+  publicKey?: string,
+): Promise<DripsStreamData | null> {
+  try {
+    const val = await simulate("get_drips_stream", [
+      nativeToScVal(listId, { type: "u64" }),
+      nativeToScVal(member, { type: "address" }),
+    ], publicKey);
+    const stream = scValToNative(val) as any;
+    if (!stream) return null;
+    return {
+      funder: String(stream.funder),
+      list_id: Number(stream.list_id),
+      member: String(stream.member),
+      token: String(stream.token),
+      amt_per_sec: BigInt(stream.amt_per_sec ?? 0),
+      start_time: Number(stream.start_time ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ---------- Write ----------
 
 async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]): Promise<string> {
@@ -353,6 +387,37 @@ async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]
     status = await server.getTransaction(submitted.hash);
   }
   return submitted.hash;
+}
+
+export async function createDripsList(publicKey: string, name: string): Promise<string> {
+  return buildAndSend(publicKey, "create_drips_list", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(name, { type: "string" }),
+  ]);
+}
+
+export async function addToDripsList(
+  publicKey: string,
+  listId: number,
+  member: string,
+): Promise<string> {
+  return buildAndSend(publicKey, "add_to_drips_list", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(listId, { type: "u64" }),
+    nativeToScVal(member, { type: "address" }),
+  ]);
+}
+
+export async function removeFromDripsList(
+  publicKey: string,
+  listId: number,
+  member: string,
+): Promise<string> {
+  return buildAndSend(publicKey, "remove_from_drips_list", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(listId, { type: "u64" }),
+    nativeToScVal(member, { type: "address" }),
+  ]);
 }
 
 function buildCreateScheduleArgs(

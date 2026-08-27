@@ -9,7 +9,7 @@ import { matchesAddressOrToken } from "@/lib/tokens";
 
 interface IndexedEvent {
   id: string;
-  event_type: "schedule_created" | "claimed" | "revoked" | "unknown";
+  event_type: string;
   ledger: number;
   ledger_closed_at: string;
   schedule_id: number | null;
@@ -21,7 +21,41 @@ interface IndexedEvent {
   created_at: number;
 }
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 20;
+type EventFilter = "all" | "stream" | "give" | "collect" | "split";
+
+function eventCategory(eventType: string): Exclude<EventFilter, "all"> | null {
+  if (["schedule_created", "stream_set", "stream_opened", "stream_closed", "claimed", "revoked"].includes(eventType)) return "stream";
+  if (["given", "give", "give_sent", "give_received"].includes(eventType)) return "give";
+  if (["collected", "collect"].includes(eventType)) return "collect";
+  if (["split", "splits", "split_set", "splits_set"].includes(eventType)) return "split";
+  return null;
+}
+
+function eventLabel(event: IndexedEvent): string {
+  const labels: Record<string, string> = {
+    schedule_created: "Stream opened",
+    stream_set: "Stream updated",
+    stream_opened: "Stream opened",
+    stream_closed: "Stream closed",
+    claimed: "Claim",
+    revoked: "Stream revoked",
+    given: "Give",
+    give: "Give",
+    give_sent: "Give sent",
+    give_received: "Give received",
+    collected: "Collect",
+    collect: "Collect",
+    split: "Split",
+    split_set: "Split updated",
+    splits_set: "Split updated",
+  };
+  return labels[event.event_type] || event.event_type;
+}
+
+function eventAmount(event: IndexedEvent): string | null {
+  return event.amount ?? event.created_amount;
+}
 
 function formatEventDate(isoString: string): string {
   try {
@@ -44,6 +78,7 @@ export default function TransactionHistory() {
   const [err, setErr] = useState("");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
+  const [eventFilter, setEventFilter] = useState<EventFilter>("all");
 
   useEffect(() => {
     if (!publicKey) return;
@@ -54,7 +89,7 @@ export default function TransactionHistory() {
       .then(r => r.json())
       .then(data => {
         const filtered: IndexedEvent[] = (data.events ?? []).filter(
-          (e: IndexedEvent) => e.event_type === "claimed" || e.event_type === "revoked"
+          (e: IndexedEvent) => eventCategory(e.event_type) !== null
         );
         filtered.sort((a, b) => b.ledger - a.ledger);
         setEvents(filtered);
@@ -68,8 +103,9 @@ export default function TransactionHistory() {
   // Client-side filtering by address prefix, token symbol, or schedule ID (Issue #647)
   const q = query.trim().toLowerCase();
   const filteredEvents = useMemo(() => {
-    if (!q) return events;
     return events.filter(e => {
+      if (eventFilter !== "all" && eventCategory(e.event_type) !== eventFilter) return false;
+      if (!q) return true;
       // Check schedule ID match (e.g. "12" or "#12")
       if (e.schedule_id !== null && (e.schedule_id.toString() === q || `#${e.schedule_id}` === q)) {
         return true;
@@ -85,10 +121,10 @@ export default function TransactionHistory() {
         [e.token]
       );
     });
-  }, [events, q]);
+  }, [events, eventFilter, q]);
 
   // Reset to page 1 when filtered events count changes
-  useEffect(() => { setPage(1); }, [filteredEvents.length]);
+  useEffect(() => { setPage(1); }, [filteredEvents.length, eventFilter, q]);
 
   if (!publicKey) {
     return (
@@ -117,7 +153,7 @@ export default function TransactionHistory() {
   if (events.length === 0) {
     return (
       <div className="card p-8 text-center text-zinc-400">
-        No claim or revoke transactions found for your wallet.
+        No drip-related transactions found for your wallet.
       </div>
     );
   }
@@ -137,6 +173,21 @@ export default function TransactionHistory() {
           resultCount={filteredEvents.length}
           totalCount={events.length}
         />
+        <label className="flex items-center gap-2 text-sm text-zinc-400">
+          <span className="sr-only">Filter by event type</span>
+          <select
+            value={eventFilter}
+            onChange={event => setEventFilter(event.target.value as EventFilter)}
+            className="input w-full sm:w-48"
+            aria-label="Filter by event type"
+          >
+            <option value="all">All event types</option>
+            <option value="stream">Streams</option>
+            <option value="give">Gives</option>
+            <option value="collect">Collects</option>
+            <option value="split">Splits</option>
+          </select>
+        </label>
       </div>
 
       {filteredEvents.length === 0 ? (
@@ -151,7 +202,8 @@ export default function TransactionHistory() {
               <thead>
                 <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-white/5">
                   <th className="text-left py-3 pr-4 font-medium">Type</th>
-                  <th className="text-left py-3 pr-4 font-medium">Schedule</th>
+                  <th className="text-left py-3 pr-4 font-medium">Counterparty</th>
+                  <th className="text-left py-3 pr-4 font-medium">Token</th>
                   <th className="text-left py-3 pr-4 font-medium">Amount</th>
                   <th className="text-left py-3 pr-4 font-medium">Date</th>
                   <th className="text-left py-3 font-medium">Ledger</th>
@@ -164,31 +216,28 @@ export default function TransactionHistory() {
                     className="border-b border-white/5 hover:bg-white/3 transition-colors"
                   >
                     <td className="py-3 pr-4">
-                      {event.event_type === "claimed" ? (
-                        <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">
-                          Claim
-                        </span>
-                      ) : (
-                        <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/10 text-red-400">
-                          Revoke
-                        </span>
-                      )}
+                      <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300">
+                        {eventLabel(event)}
+                      </span>
                     </td>
                     <td className="py-3 pr-4 text-zinc-300">
-                      {event.schedule_id !== null ? (
+                      {(event.beneficiary || event.grantor) ? (
                         <Link
-                          href={`/schedule/${event.schedule_id}`}
+                          href={`/profile/${encodeURIComponent(event.beneficiary || event.grantor || "")}`}
                           className="hover:text-violet-400 transition-colors"
                         >
-                          #{event.schedule_id}
+                          {(event.beneficiary || event.grantor || "").slice(0, 6)}...
                         </Link>
                       ) : (
                         <span className="text-zinc-600">—</span>
                       )}
                     </td>
+                    <td className="py-3 pr-4 text-zinc-400 font-mono text-xs">
+                      {event.token ? `${event.token.slice(0, 6)}...` : <span className="text-zinc-600">—</span>}
+                    </td>
                     <td className="py-3 pr-4 text-zinc-300 font-mono">
-                      {event.event_type === "claimed" && event.amount !== null
-                        ? `${stroopsToXlm(BigInt(event.amount))} XLM`
+                      {eventAmount(event) !== null
+                        ? `${stroopsToXlm(BigInt(eventAmount(event)!))} XLM`
                         : <span className="text-zinc-600">—</span>}
                     </td>
                     <td className="py-3 pr-4 text-zinc-400">

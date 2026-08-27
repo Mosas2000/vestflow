@@ -68,7 +68,9 @@ export default function ScheduleDetailPage() {
 
   // Streaming balance state (#628)
   const [streamingBalance, setStreamingBalance] = useState<bigint | null>(null);
+  const [liveStreamingBalance, setLiveStreamingBalance] = useState<bigint | null>(null);
   const [streamingRatePerSec, setStreamingRatePerSec] = useState<bigint>(0n);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
 
   // Transfer grantor state (#262)
   const [showTransferGrantor, setShowTransferGrantor] = useState(false);
@@ -96,7 +98,7 @@ export default function ScheduleDetailPage() {
     }
   }, [id]);
 
-  // Poll streaming balance every 5 seconds (#628)
+  // Fetch the balance baseline once; the live value is calculated locally.
   useEffect(() => {
     if (!schedule || schedule.revoked) return;
     let active = true;
@@ -117,9 +119,39 @@ export default function ScheduleDetailPage() {
     };
 
     fetchBalance();
-    const interval = setInterval(fetchBalance, 5000);
-    return () => { active = false; clearInterval(interval); };
+    return () => { active = false; };
   }, [schedule]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updatePreference = () => setPrefersReducedMotion(mediaQuery.matches);
+    updatePreference();
+    mediaQuery.addEventListener?.("change", updatePreference);
+    return () => mediaQuery.removeEventListener?.("change", updatePreference);
+  }, []);
+
+  useEffect(() => {
+    if (streamingBalance === null) {
+      setLiveStreamingBalance(null);
+      return;
+    }
+
+    const rate = schedule?.paused ? 0n : streamingRatePerSec;
+    const startedAt = Date.now();
+    const update = () => {
+      const elapsedMs = BigInt(Math.max(0, Date.now() - startedAt));
+      const elapsedAmount = (rate * elapsedMs) / 1000n;
+      setLiveStreamingBalance(
+        elapsedAmount >= streamingBalance ? 0n : streamingBalance - elapsedAmount
+      );
+    };
+
+    update();
+    if (prefersReducedMotion || rate <= 0n) return;
+    const interval = setInterval(update, 100);
+    return () => clearInterval(interval);
+  }, [streamingBalance, streamingRatePerSec, schedule?.paused, prefersReducedMotion]);
 
   // Distinguish this tab from other open schedule tabs — the layout's static
   // "VestFlow" title otherwise makes every schedule page indistinguishable.
@@ -373,9 +405,10 @@ export default function ScheduleDetailPage() {
               <p className="text-xs text-zinc-500 mb-2 uppercase tracking-wider">Streaming Balance</p>
               {(() => {
                 const total = schedule.total_amount;
-                const remaining = streamingBalance > total ? total : streamingBalance;
+                const displayedBalance = liveStreamingBalance ?? streamingBalance;
+                const remaining = displayedBalance > total ? total : displayedBalance;
                 const pct = total > 0n ? Math.min(100, Math.round((Number(remaining) / Number(total)) * 100)) : 0;
-                const rate = streamingRatePerSec;
+                const rate = schedule.paused ? 0n : streamingRatePerSec;
                 const hasEnd = schedule.duration > 0;
                 const endTime = schedule.start_time + schedule.duration;
                 const nowSec = Math.floor(Date.now() / 1000);
@@ -405,7 +438,7 @@ export default function ScheduleDetailPage() {
                       aria-valuemax={100}
                     >
                       <div
-                        className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-1000"
+                        className={`absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500${prefersReducedMotion ? "" : " transition-all duration-1000"}`}
                         style={{ width: `${pct}%` }}
                       />
                     </div>

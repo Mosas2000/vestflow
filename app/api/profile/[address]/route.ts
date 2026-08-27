@@ -5,6 +5,11 @@ import {
   getClaimableBulk,
   NETWORK,
 } from "@/lib/stellar";
+import {
+  queryDripsLists,
+  queryDripsStreams,
+  queryGivesForAccount,
+} from "@/indexer/src/db";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { getOrSetCache } from "@/lib/redisCache";
 import { NextRequest, NextResponse } from "next/server";
@@ -38,7 +43,10 @@ interface ProfileResponse {
     total_received: string;
     schedule_count_as_grantor: number;
     schedule_count_as_beneficiary: number;
+    records: ReturnType<typeof queryGivesForAccount>;
   };
+  outgoing_streams: ReturnType<typeof queryDripsStreams>["items"];
+  drips_lists: ReturnType<typeof queryDripsLists> extends { items: infer T } ? T : never[];
   timestamp: number;
 }
 
@@ -126,6 +134,9 @@ async function buildProfile(address: string): Promise<ProfileResponse> {
   );
 
   if (allIds.length === 0) {
+    const outgoingStreams = queryDripsStreams({ account: address, limit: 100 })?.items ?? [];
+    const dripsLists = queryDripsLists({ owner: address, limit: 100 })?.items ?? [];
+    const gives = queryGivesForAccount(address);
     return {
       address,
       network: NETWORK,
@@ -136,7 +147,10 @@ async function buildProfile(address: string): Promise<ProfileResponse> {
         total_received: "0",
         schedule_count_as_grantor: 0,
         schedule_count_as_beneficiary: 0,
+        records: gives,
       },
+      outgoing_streams: outgoingStreams,
+      drips_lists: dripsLists,
       timestamp: now,
     };
   }
@@ -153,6 +167,9 @@ async function buildProfile(address: string): Promise<ProfileResponse> {
   const splits: ProfileScheduleSummary[] = [];
   let totalGiven = 0n;
   let totalReceived = 0n;
+  const outgoingStreams = queryDripsStreams({ account: address, limit: 100 })?.items ?? [];
+  const dripsLists = queryDripsLists({ owner: address, limit: 100 })?.items ?? [];
+  const gives = queryGivesForAccount(address);
 
   for (let i = 0; i < allIds.length; i++) {
     const schedule = schedules[i];
@@ -197,7 +214,10 @@ async function buildProfile(address: string): Promise<ProfileResponse> {
       total_received: totalReceived.toString(),
       schedule_count_as_grantor: streams.length,
       schedule_count_as_beneficiary: splits.length,
+      records: gives,
     },
+    outgoing_streams: outgoingStreams,
+    drips_lists: dripsLists,
     timestamp: now,
   };
 }

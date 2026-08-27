@@ -11,7 +11,7 @@ export default function HistoryPage() {
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>
             <h1 className="text-3xl font-bold">Transaction History</h1>
-            <p className="text-zinc-400 mt-1">Your claim and revoke events</p>
+            <p className="text-zinc-400 mt-1">Streams, gives, collects, and splits for your wallet</p>
           </div>
           <Link href="/app" className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-2 transition-colors">
             ← Back to Dashboard
