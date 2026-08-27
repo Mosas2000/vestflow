@@ -524,6 +524,16 @@ export async function transferBeneficiary(
   ]);
 }
 
+/**
+ * Squeeze a stream — collect tokens dripped so far in the current (not yet settled) cycle.
+ * The receiver can call this to claim accrued tokens without waiting for full stream settlement.
+ */
+export async function squeezeStream(publicKey: string, scheduleId: number): Promise<string> {
+  return buildAndSend(publicKey, "squeeze_streams", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
+}
+
 // ---------- Types ----------
 
 export interface ScheduleData {
