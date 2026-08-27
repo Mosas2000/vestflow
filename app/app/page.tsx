@@ -30,6 +30,7 @@ import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
 import { useAddressBook } from "@/hooks/useAddressBook";
 import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
+import { useStreamNotifications } from "@/hooks/useStreamNotifications";
 import Link from "next/link";
 
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
@@ -542,6 +543,9 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { load(); }, [publicKey]);
+
+  // Stream notifications for incoming streams
+  useStreamNotifications(publicKey ? schedules : null, publicKey);
 
   // Recently viewed schedules (#416), resolved from the wallet-filtered list
   // and ordered most-recent-first.
