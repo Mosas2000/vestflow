@@ -47,7 +47,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
-    Env, IntoVal, Vec,
+    Env, IntoVal, String, Vec,
 };
 
 pub const VERSION: u32 = 1;
@@ -111,6 +111,12 @@ pub enum DataKey {
     Proposal(u64),
     /// Monotonic counter of proposals ever created.
     ProposalCount,
+    /// Drips list by id.
+    DripsList(u64),
+    /// Monotonic counter of drips lists created.
+    DripsListCount,
+    /// Active drips stream from funder to member for a list: (list_id, member).
+    DripsStream(u64, Address),
 }
 
 /// Storage keys for claim delegations, keyed separately from [`DataKey`] so
@@ -198,6 +204,28 @@ pub struct ScheduleProposal {
     pub revocable: bool,
     pub state: ProposalState,
     pub created_at_ledger: u32,
+}
+
+/// A named list of member addresses to receive stream funding.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DripsList {
+    pub id: u64,
+    pub owner: Address,
+    pub name: String,
+    pub members: Vec<Address>,
+}
+
+/// An active stream from a funder to a drips list member.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DripsStream {
+    pub funder: Address,
+    pub list_id: u64,
+    pub member: Address,
+    pub token: Address,
+    pub amt_per_sec: i128,
+    pub start_time: u64,
 }
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
@@ -3039,6 +3067,180 @@ impl VestFlowContract {
         );
 
         Ok(merged_id)
+    }
+
+    /// Create a named funding list of recipient addresses.
+    ///
+    /// Returns a unique list ID. Emits a `list_created` event with topics `[owner]`
+    /// and data `(id, name)`.
+    pub fn create_drips_list(env: Env, owner: Address, name: String) -> u64 {
+        owner.require_auth();
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DripsListCount)
+            .unwrap_or(0);
+        let id = count + 1;
+
+        let list = DripsList {
+            id,
+            owner: owner.clone(),
+            name: name.clone(),
+            members: vec![&env],
+        };
+
+        env.storage().instance().set(&DataKey::DripsList(id), &list);
+        env.storage().instance().set(&DataKey::DripsListCount, &id);
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "list_created"), owner),
+            (id, name),
+        );
+
+        id
+    }
+
+    /// Read member address at a 0-indexed position in a drips list.
+    ///
+    /// Returns `None` if the list ID is unknown or if index is out of bounds.
+    pub fn drips_list_entry(env: Env, list_id: u64, index: u32) -> Option<Address> {
+        let list: DripsList = env
+            .storage()
+            .instance()
+            .get(&DataKey::DripsList(list_id))?;
+        if index < list.members.len() {
+            Some(list.members.get(index).unwrap())
+        } else {
+            None
+        }
+    }
+
+    /// Add a member address to a drips list.
+    ///
+    /// Only the list owner can modify the list. Idempotent if member is already in the list.
+    pub fn add_to_drips_list(env: Env, owner: Address, list_id: u64, member: Address) {
+        owner.require_auth();
+
+        let mut list: DripsList = env
+            .storage()
+            .instance()
+            .get(&DataKey::DripsList(list_id))
+            .expect("List not found");
+
+        assert!(list.owner == owner, "Not owner");
+
+        if !list.members.contains(&member) {
+            list.members.push_back(member);
+            env.storage().instance().set(&DataKey::DripsList(list_id), &list);
+            env.storage().instance().extend_ttl(
+                INSTANCE_TTL_THRESHOLD_LEDGERS,
+                INSTANCE_TTL_EXTEND_TO_LEDGERS,
+            );
+        }
+    }
+
+    /// Remove a member address from a drips list.
+    ///
+    /// Only the list owner can modify the list.
+    pub fn remove_from_drips_list(env: Env, owner: Address, list_id: u64, member: Address) {
+        owner.require_auth();
+
+        let mut list: DripsList = env
+            .storage()
+            .instance()
+            .get(&DataKey::DripsList(list_id))
+            .expect("List not found");
+
+        assert!(list.owner == owner, "Not owner");
+
+        let mut idx_to_remove: Option<u32> = None;
+        for i in 0..list.members.len() {
+            if list.members.get(i).unwrap() == member {
+                idx_to_remove = Some(i);
+                break;
+            }
+        }
+
+        if let Some(i) = idx_to_remove {
+            list.members.remove(i);
+            env.storage().instance().set(&DataKey::DripsList(list_id), &list);
+            env.storage().instance().extend_ttl(
+                INSTANCE_TTL_THRESHOLD_LEDGERS,
+                INSTANCE_TTL_EXTEND_TO_LEDGERS,
+            );
+        }
+    }
+
+    /// Stream funds to all members of a drips list equally.
+    ///
+    /// Calculates `amt_per_sec = total_amt_per_sec / member_count` and opens streams
+    /// to all current list members. If `balance_top_up > 0`, pulls tokens from `funder`.
+    /// Does nothing if the list is empty.
+    pub fn fund_drips_list(
+        env: Env,
+        funder: Address,
+        list_id: u64,
+        token: Address,
+        total_amt_per_sec: i128,
+        balance_top_up: i128,
+    ) {
+        funder.require_auth();
+
+        let list: DripsList = env
+            .storage()
+            .instance()
+            .get(&DataKey::DripsList(list_id))
+            .expect("List not found");
+
+        if list.members.is_empty() {
+            return;
+        }
+
+        if balance_top_up > 0 {
+            token::Client::new(&env, &token).transfer(
+                &funder,
+                &env.current_contract_address(),
+                &balance_top_up,
+            );
+        }
+
+        let count = list.members.len() as i128;
+        let amt_per_sec = total_amt_per_sec / count;
+        let start_time = env.ledger().timestamp();
+
+        for member in list.members.iter() {
+            let stream = DripsStream {
+                funder: funder.clone(),
+                list_id,
+                member: member.clone(),
+                token: token.clone(),
+                amt_per_sec,
+                start_time,
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::DripsStream(list_id, member), &stream);
+        }
+
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+    }
+
+    /// View helper to fetch a drips list by ID.
+    pub fn get_drips_list(env: Env, list_id: u64) -> Option<DripsList> {
+        env.storage().instance().get(&DataKey::DripsList(list_id))
+    }
+
+    /// View helper to fetch a drips stream for a list member.
+    pub fn get_drips_stream(env: Env, list_id: u64, member: Address) -> Option<DripsStream> {
+        env.storage().instance().get(&DataKey::DripsStream(list_id, member))
     }
 }
 
@@ -7055,5 +7257,120 @@ mod test {
             // Dust is always 0 because total_remaining is an exact sum of remainders.
             prop_assert_eq!(total_claimed + total_remaining, total_original);
         }
+    }
+
+    #[test]
+    fn test_create_drips_list_success_and_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, _, _, _) = setup(&env);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Core Contributors"));
+        assert_eq!(list_id, 1);
+
+        let list = client.get_drips_list(&list_id).unwrap();
+        assert_eq!(list.id, 1);
+        assert_eq!(list.owner, owner);
+        assert_eq!(list.name, soroban_sdk::String::from_str(&env, "Core Contributors"));
+        assert_eq!(list.members.len(), 0);
+
+        // Duplicate name allowed -> yields unique ID 2
+        let list_id_2 = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Core Contributors"));
+        assert_eq!(list_id_2, 2);
+    }
+
+    #[test]
+    fn test_drips_list_entry_views() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, _, _) = setup(&env);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Dependencies"));
+
+        // Empty list -> index 0 returns None
+        assert_eq!(client.drips_list_entry(&list_id, &0), None);
+
+        client.add_to_drips_list(&owner, &list_id, &member1);
+
+        // Valid index -> returns Some(member1)
+        assert_eq!(client.drips_list_entry(&list_id, &0), Some(member1.clone()));
+
+        // Out of bounds -> returns None
+        assert_eq!(client.drips_list_entry(&list_id, &1), None);
+        assert_eq!(client.drips_list_entry(&999, &0), None);
+    }
+
+    #[test]
+    fn test_add_and_remove_drips_list_members() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, _, _) = setup(&env);
+        let member2 = Address::generate(&env);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Dev Team"));
+
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.add_to_drips_list(&owner, &list_id, &member2);
+
+        let list = client.get_drips_list(&list_id).unwrap();
+        assert_eq!(list.members.len(), 2);
+        assert_eq!(list.members.get(0).unwrap(), member1);
+        assert_eq!(list.members.get(1).unwrap(), member2);
+
+        // Duplicate add is idempotent
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        let list_after_dup = client.get_drips_list(&list_id).unwrap();
+        assert_eq!(list_after_dup.members.len(), 2);
+
+        // Remove member1
+        client.remove_from_drips_list(&owner, &list_id, &member1);
+        let list_after_remove = client.get_drips_list(&list_id).unwrap();
+        assert_eq!(list_after_remove.members.len(), 1);
+        assert_eq!(list_after_remove.members.get(0).unwrap(), member2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not owner")]
+    fn test_add_to_drips_list_non_owner_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, _, _) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Dev Team"));
+        client.add_to_drips_list(&stranger, &list_id, &member1);
+    }
+
+    #[test]
+    fn test_fund_drips_list_one_and_many_members() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+        let member2 = Address::generate(&env);
+        let funder = owner.clone();
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Funded List"));
+
+        // Empty list -> fund_drips_list is a no-op
+        client.fund_drips_list(&funder, &list_id, &token_address, &1000, &100);
+        assert_eq!(client.get_drips_stream(&list_id, &member1), None);
+
+        // Add 1 member -> 100% of amt_per_sec goes to member1
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&funder, &list_id, &token_address, &1000, &100);
+
+        let stream1 = client.get_drips_stream(&list_id, &member1).unwrap();
+        assert_eq!(stream1.funder, funder);
+        assert_eq!(stream1.member, member1);
+        assert_eq!(stream1.amt_per_sec, 1000);
+
+        // Add 2nd member -> 50% of total_amt_per_sec goes to each
+        client.add_to_drips_list(&owner, &list_id, &member2);
+        client.fund_drips_list(&funder, &list_id, &token_address, &1000, &200);
+
+        let stream1_updated = client.get_drips_stream(&list_id, &member1).unwrap();
+        let stream2 = client.get_drips_stream(&list_id, &member2).unwrap();
+        assert_eq!(stream1_updated.amt_per_sec, 500);
+        assert_eq!(stream2.amt_per_sec, 500);
     }
 }
