@@ -117,6 +117,12 @@ pub enum DataKey {
     DripsListCount,
     /// Active drips stream from funder to member for a list: (list_id, member).
     DripsStream(u64, Address),
+    /// Funds an account has deposited to pay for its outgoing streams of a
+    /// token: (account, token).
+    StreamBalance(Address, Address),
+    /// Index of drips list IDs an address receives a stream from, so incoming
+    /// streams can be enumerated without scanning every list.
+    MemberStreamLists(Address),
 }
 
 /// Storage keys for claim delegations, keyed separately from [`DataKey`] so
@@ -214,6 +220,22 @@ pub struct DripsList {
     pub owner: Address,
     pub name: String,
     pub members: Vec<Address>,
+}
+
+/// Length of one drips cycle in seconds (one week).
+///
+/// Streaming amounts are accounted for in whole cycles. Exposed on-chain via
+/// [`VestFlowContract::cycle_secs`] so clients read it from the deployed
+/// contract instead of hardcoding it.
+pub const CYCLE_SECS: u32 = 7 * 24 * 60 * 60;
+
+/// One entry in a sender's stream configuration: an address and the rate at
+/// which it is paid, in token base units per second.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamReceiver {
+    pub receiver: Address,
+    pub amt_per_sec: i128,
 }
 
 /// An active stream from a funder to a drips list member.
@@ -3207,6 +3229,12 @@ impl VestFlowContract {
                 &env.current_contract_address(),
                 &balance_top_up,
             );
+
+            let balance_key = DataKey::StreamBalance(funder.clone(), token.clone());
+            let funded: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&balance_key, &(funded + balance_top_up));
         }
 
         let count = list.members.len() as i128;
@@ -3224,7 +3252,18 @@ impl VestFlowContract {
             };
             env.storage()
                 .instance()
-                .set(&DataKey::DripsStream(list_id, member), &stream);
+                .set(&DataKey::DripsStream(list_id, member.clone()), &stream);
+
+            let index_key = DataKey::MemberStreamLists(member);
+            let mut list_ids: Vec<u64> = env
+                .storage()
+                .instance()
+                .get(&index_key)
+                .unwrap_or_else(|| vec![&env]);
+            if !list_ids.contains(&list_id) {
+                list_ids.push_back(list_id);
+                env.storage().instance().set(&index_key, &list_ids);
+            }
         }
 
         env.storage().instance().extend_ttl(
@@ -3241,6 +3280,110 @@ impl VestFlowContract {
     /// View helper to fetch a drips stream for a list member.
     pub fn get_drips_stream(env: Env, list_id: u64, member: Address) -> Option<DripsStream> {
         env.storage().instance().get(&DataKey::DripsStream(list_id, member))
+    }
+
+    /// Length of one drips cycle in seconds.
+    ///
+    /// Reads back the [`CYCLE_SECS`] constant so frontends, SDKs, and indexers
+    /// can source it from the deployed contract rather than hardcoding it.
+    pub fn cycle_secs(_env: Env) -> u32 {
+        CYCLE_SECS
+    }
+
+    /// Total amount of `token` currently held by this contract across every
+    /// account — vesting escrow, streaming balances, and collectable balances.
+    ///
+    /// Read straight from the token contract, so it always matches the on-chain
+    /// holdings rather than an internally maintained counter.
+    pub fn total_balance(env: Env, token: Address) -> i128 {
+        token::Client::new(&env, &token).balance(&env.current_contract_address())
+    }
+
+    /// Funds `account` deposited for its outgoing streams of `token` that have
+    /// not been streamed out yet.
+    ///
+    /// Returns 0 for an account that has never funded a stream of this token.
+    pub fn stream_balance(env: Env, account: Address, token: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::StreamBalance(account, token))
+            .unwrap_or(0)
+    }
+
+    /// Timestamp at which `account`'s streaming balance for `token` runs out,
+    /// given `receivers` as the stream configuration.
+    ///
+    /// Returns the current ledger timestamp when the balance is already
+    /// exhausted, and `u64::MAX` when nothing is being streamed (the balance
+    /// never runs out).
+    pub fn max_end_time(
+        env: Env,
+        account: Address,
+        token: Address,
+        receivers: Vec<StreamReceiver>,
+    ) -> u64 {
+        let now = env.ledger().timestamp();
+
+        let mut total_amt_per_sec: i128 = 0;
+        for receiver in receivers.iter() {
+            if receiver.amt_per_sec > 0 {
+                total_amt_per_sec = total_amt_per_sec.saturating_add(receiver.amt_per_sec);
+            }
+        }
+        if total_amt_per_sec == 0 {
+            return u64::MAX;
+        }
+
+        let balance = Self::stream_balance(env, account, token);
+        if balance <= 0 {
+            return now;
+        }
+
+        let remaining_secs = balance / total_amt_per_sec;
+        if remaining_secs >= u64::MAX as i128 {
+            u64::MAX
+        } else {
+            now.saturating_add(remaining_secs as u64)
+        }
+    }
+
+    /// Amount of `token` that `account` can collect right now from its incoming
+    /// streams, without submitting a transaction.
+    ///
+    /// Each stream accrues `amt_per_sec` per second since it opened, bounded by
+    /// what its funder has actually deposited and by the contract's total
+    /// holdings of the token, so the result is never more than is collectable.
+    pub fn collectable_amount(env: Env, account: Address, token: Address) -> i128 {
+        let list_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberStreamLists(account.clone()))
+            .unwrap_or_else(|| vec![&env]);
+
+        let now = env.ledger().timestamp();
+        let mut collectable: i128 = 0;
+
+        for list_id in list_ids.iter() {
+            let stream: DripsStream = match env
+                .storage()
+                .instance()
+                .get(&DataKey::DripsStream(list_id, account.clone()))
+            {
+                Some(stream) => stream,
+                None => continue,
+            };
+
+            if stream.token != token || stream.amt_per_sec <= 0 || now <= stream.start_time {
+                continue;
+            }
+
+            let elapsed = (now - stream.start_time) as i128;
+            let accrued = stream.amt_per_sec.saturating_mul(elapsed);
+            let funded = Self::stream_balance(env.clone(), stream.funder, token.clone());
+            collectable = collectable.saturating_add(accrued.min(funded));
+        }
+
+        collectable.min(Self::total_balance(env, token))
     }
 }
 
@@ -7372,5 +7515,111 @@ mod test {
         let stream2 = client.get_drips_stream(&list_id, &member2).unwrap();
         assert_eq!(stream1_updated.amt_per_sec, 500);
         assert_eq!(stream2.amt_per_sec, 500);
+    }
+
+    #[test]
+    fn test_cycle_secs_view() {
+        let env = Env::default();
+        let (client, _, _, _, _) = setup(&env);
+
+        assert_eq!(client.cycle_secs(), CYCLE_SECS);
+        assert_eq!(client.cycle_secs(), 604_800);
+    }
+
+    #[test]
+    fn test_total_balance_view() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+
+        // Nothing deposited yet.
+        assert_eq!(client.total_balance(&token_address), 0);
+
+        let list_id = client
+            .create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Analytics"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &500);
+
+        assert_eq!(client.total_balance(&token_address), 500);
+
+        // A second top-up accumulates.
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &250);
+        assert_eq!(client.total_balance(&token_address), 750);
+    }
+
+    #[test]
+    fn test_max_end_time_view() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+        set_time(&env, 1_000);
+
+        let receivers = vec![
+            &env,
+            StreamReceiver {
+                receiver: member1.clone(),
+                amt_per_sec: 3,
+            },
+            StreamReceiver {
+                receiver: Address::generate(&env),
+                amt_per_sec: 2,
+            },
+        ];
+
+        // No streaming config -> balance never runs out.
+        assert_eq!(
+            client.max_end_time(&owner, &token_address, &vec![&env]),
+            u64::MAX
+        );
+
+        // Streaming with no balance -> already exhausted.
+        assert_eq!(
+            client.max_end_time(&owner, &token_address, &receivers),
+            1_000
+        );
+
+        let list_id =
+            client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Runway"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &500);
+
+        // 500 balance / 5 per sec = 100 seconds of runway from now.
+        assert_eq!(
+            client.max_end_time(&owner, &token_address, &receivers),
+            1_100
+        );
+    }
+
+    #[test]
+    fn test_collectable_amount_view() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+        set_time(&env, 1_000);
+
+        // No incoming streams -> nothing collectable.
+        assert_eq!(client.collectable_amount(&member1, &token_address), 0);
+
+        let list_id =
+            client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Payroll"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &500);
+
+        // Stream just opened -> nothing accrued yet.
+        assert_eq!(client.collectable_amount(&member1, &token_address), 0);
+
+        // 20s at 10/sec.
+        set_time(&env, 1_020);
+        assert_eq!(client.collectable_amount(&member1, &token_address), 200);
+
+        // Accrual is capped by what the funder actually deposited.
+        set_time(&env, 9_000);
+        assert_eq!(client.collectable_amount(&member1, &token_address), 500);
+
+        // A different token has no streams.
+        let other_token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        assert_eq!(client.collectable_amount(&member1, &other_token), 0);
     }
 }
