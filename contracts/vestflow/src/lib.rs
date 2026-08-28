@@ -3385,6 +3385,139 @@ impl VestFlowContract {
 
         collectable.min(Self::total_balance(env, token))
     }
+
+    /// Return the current per-second drip rate from `sender` to `receiver` for `token`.
+    ///
+    /// Returns 0 for senders with no stream configured to `receiver` for `token`.
+    pub fn stream_rate_for(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+    ) -> i128 {
+        let list_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberStreamLists(receiver.clone()))
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut rate: i128 = 0;
+        for list_id in list_ids.iter() {
+            if let Some(stream) = env
+                .storage()
+                .instance()
+                .get::<DataKey, DripsStream>(&DataKey::DripsStream(list_id, receiver.clone()))
+            {
+                if stream.funder == sender && stream.token == token && stream.amt_per_sec > 0 {
+                    rate = rate.saturating_add(stream.amt_per_sec);
+                }
+            }
+        }
+        rate
+    }
+
+    /// Check whether `sender` currently has an active (non-zero rate) stream configured to `receiver` for `token`.
+    pub fn is_stream_active(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+    ) -> bool {
+        Self::stream_rate_for(env, sender, receiver, token) > 0
+    }
+
+    /// Pull unused streaming balance back to `account`.
+    ///
+    /// Reverts with `"InsufficientBalance"` if `amount` exceeds available balance.
+    /// Emits a `withdrawn` event.
+    pub fn withdraw(env: Env, account: Address, token: Address, amount: i128) {
+        account.require_auth();
+
+        let balance = Self::stream_balance(env.clone(), account.clone(), token.clone());
+        assert!(balance >= amount, "InsufficientBalance");
+
+        let balance_key = DataKey::StreamBalance(account.clone(), token.clone());
+        env.storage()
+            .instance()
+            .set(&balance_key, &(balance - amount));
+
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &account,
+            &amount,
+        );
+
+        env.events().publish(
+            (symbol_short!("withdrawn"), account.clone(), token.clone()),
+            amount,
+        );
+    }
+
+    /// Collect and distribute streamed funds for `account` and `token`.
+    ///
+    /// Emits a `split` event with topics `[account, token]` and value `(collected, split_to_others)`.
+    pub fn split(env: Env, account: Address, token: Address) -> (i128, i128) {
+        account.require_auth();
+
+        let list_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberStreamLists(account.clone()))
+            .unwrap_or_else(|| vec![&env]);
+
+        let now = env.ledger().timestamp();
+        let mut total_collectable: i128 = 0;
+
+        for list_id in list_ids.iter() {
+            let mut stream: DripsStream = match env
+                .storage()
+                .instance()
+                .get(&DataKey::DripsStream(list_id, account.clone()))
+            {
+                Some(stream) => stream,
+                None => continue,
+            };
+
+            if stream.token != token || stream.amt_per_sec <= 0 || now <= stream.start_time {
+                continue;
+            }
+
+            let elapsed = (now - stream.start_time) as i128;
+            let accrued = stream.amt_per_sec.saturating_mul(elapsed);
+            let funded_key = DataKey::StreamBalance(stream.funder.clone(), token.clone());
+            let funded: i128 = env.storage().instance().get(&funded_key).unwrap_or(0);
+            let payout = accrued.min(funded);
+
+            if payout > 0 {
+                env.storage()
+                    .instance()
+                    .set(&funded_key, &(funded - payout));
+                stream.start_time = now;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::DripsStream(list_id, account.clone()), &stream);
+                total_collectable = total_collectable.saturating_add(payout);
+            }
+        }
+
+        let collected = total_collectable.min(Self::total_balance(env.clone(), token.clone()));
+        let split_to_others: i128 = 0;
+
+        if collected > 0 {
+            token::Client::new(&env, &token).transfer(
+                &env.current_contract_address(),
+                &account,
+                &collected,
+            );
+        }
+
+        env.events().publish(
+            (symbol_short!("split"), account.clone(), token.clone()),
+            (collected, split_to_others),
+        );
+
+        (collected, split_to_others)
+    }
 }
 
 fn load_proposal(env: &Env, proposal_id: u64) -> Result<ScheduleProposal, VestFlowError> {
@@ -3577,7 +3710,7 @@ mod test {
     use super::*;
     use proptest::prelude::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, LedgerInfo},
+        testutils::{Address as _, Events as _, Ledger, LedgerInfo},
         token::{Client as TokenClient, StellarAssetClient},
         Env, IntoVal,
     };
@@ -7621,5 +7754,91 @@ mod test {
             .register_stellar_asset_contract_v2(Address::generate(&env))
             .address();
         assert_eq!(client.collectable_amount(&member1, &other_token), 0);
+    }
+
+    #[test]
+    fn test_is_stream_active_and_stream_rate_for() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        // No stream configured -> rate 0, inactive
+        assert_eq!(client.stream_rate_for(&owner, &member1, &token_address), 0);
+        assert!(!client.is_stream_active(&owner, &member1, &token_address));
+        assert!(!client.is_stream_active(&owner, &stranger, &token_address));
+
+        // Create list and fund with rate 1000
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Streams"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &1000, &5000);
+
+        // Active stream -> rate 1000, active
+        assert_eq!(client.stream_rate_for(&owner, &member1, &token_address), 1000);
+        assert!(client.is_stream_active(&owner, &member1, &token_address));
+
+        // Set stream rate to 0
+        client.fund_drips_list(&owner, &list_id, &token_address, &0, &0);
+        assert_eq!(client.stream_rate_for(&owner, &member1, &token_address), 0);
+        assert!(!client.is_stream_active(&owner, &member1, &token_address));
+    }
+
+    #[test]
+    fn test_withdraw_partial_and_full() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Withdraw List"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &1000);
+
+        assert_eq!(client.stream_balance(&owner, &token_address), 1000);
+
+        // Partial withdraw
+        client.withdraw(&owner, &token_address, &400);
+        assert_eq!(client.stream_balance(&owner, &token_address), 600);
+
+        // Full withdraw
+        client.withdraw(&owner, &token_address, &600);
+        assert_eq!(client.stream_balance(&owner, &token_address), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "InsufficientBalance")]
+    fn test_withdraw_overdraft_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Overdraft List"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &500);
+
+        // Request more than stream_balance (500) -> panics with InsufficientBalance
+        client.withdraw(&owner, &token_address, &501);
+    }
+
+    #[test]
+    fn test_split_event_and_values() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+        set_time(&env, 1_000);
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Split List"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+        client.fund_drips_list(&owner, &list_id, &token_address, &10, &1000);
+
+        // Advance 50 seconds -> 500 accrued
+        set_time(&env, 1_050);
+
+        let (collected, split_to_others) = client.split(&member1, &token_address);
+        assert_eq!(collected, 500);
+        assert_eq!(split_to_others, 0);
+
+        // Verify event was emitted
+        let events = env.events().all();
+        assert!(!events.is_empty());
     }
 }
