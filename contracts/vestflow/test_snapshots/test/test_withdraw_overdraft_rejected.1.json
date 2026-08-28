@@ -335,6 +335,17 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "accumulated"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "amt_per_sec"
                               },
                               "val": {
@@ -370,6 +381,14 @@
                             },
                             {
                               "key": {
+                                "symbol": "paused_at"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "start_time"
                               },
                               "val": {
@@ -383,6 +402,35 @@
                               "val": {
                                 "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
                               }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "FunderStreams"
+                            },
+                            {
+                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                            },
+                            {
+                              "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "vec": [
+                                {
+                                  "u64": 1
+                                },
+                                {
+                                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                                }
+                              ]
                             }
                           ]
                         }
