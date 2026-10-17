@@ -3,6 +3,9 @@ import type { ScheduleData } from "@/lib/stellar";
 /** Streams ending within this window get an expiry warning (#809). */
 export const EXPIRY_WARNING_WINDOW_SECS = 48 * 60 * 60;
 
+/** Streams ending within this window are eligible for the batch top-up action. */
+export const EXPIRY_BATCH_WINDOW_SECS = 7 * 24 * 60 * 60;
+
 /**
  * The latest time a stream can keep flowing. Paused time pushes the end
  * out, so it is added on top of the configured duration.
@@ -27,6 +30,12 @@ export function streamBalance(s: ScheduleData, vested: bigint): bigint {
 export function isExpiringSoon(s: ScheduleData, now: number): boolean {
   const secsLeft = maxEndTime(s) - now;
   return secsLeft > 0 && secsLeft <= EXPIRY_WARNING_WINDOW_SECS;
+}
+
+/** True when the stream ends within the next seven days but hasn't ended yet. */
+export function isExpiringThisWeek(s: ScheduleData, now: number): boolean {
+  const secsLeft = maxEndTime(s) - now;
+  return secsLeft > 0 && secsLeft <= EXPIRY_BATCH_WINDOW_SECS;
 }
 
 export type StreamBalanceStatus = "healthy" | "exhausted" | "stopped";

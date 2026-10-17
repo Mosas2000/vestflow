@@ -1,6 +1,5 @@
 "use client";
 import { useState, useEffect } from "react";
-import confetti from "canvas-confetti";
 import {
   ScheduleData,
   stroopsToXlm,
@@ -13,6 +12,7 @@ import { useWallet } from "@/lib/WalletContext";
 import { useToast } from "@/components/Toast";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
+import { celebrateFirstCollect } from "@/lib/firstCollectCelebration";
 
 interface ClaimModalProps {
   schedule: ScheduleData;
@@ -71,16 +71,7 @@ export default function ClaimModal({
         network: NETWORK,
       });
       
-      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      if (!prefersReducedMotion) {
-        confetti({
-          particleCount: 100,
-          spread: 70,
-          origin: { y: 0.6 },
-          zIndex: 9999,
-        });
-      }
-      
+      celebrateFirstCollect();
       onSuccess();
     } catch (e: any) {
       const msg = parseContractError(e);

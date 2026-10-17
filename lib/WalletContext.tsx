@@ -15,6 +15,8 @@ import { useToast } from "@/components/Toast";
 interface WalletCtx {
   publicKey: string | null;
   setPublicKey: (k: string | null) => void;
+  /** False until the initial wallet restore/verification has settled. */
+  walletReady: boolean;
   /** True when the session was lost silently (show reconnect prompt). */
   sessionExpired: boolean;
   /** Dismiss the reconnect prompt without reconnecting. */
@@ -26,6 +28,7 @@ interface WalletCtx {
 const WalletContext = createContext<WalletCtx>({
   publicKey: null,
   setPublicKey: () => {},
+  walletReady: true,
   sessionExpired: false,
   dismissExpired: () => {},
   reconnect: async () => {},
@@ -43,6 +46,7 @@ const HEARTBEAT_INTERVAL_MS = 60_000;
 export function WalletProvider({ children }: { children: ReactNode }) {
   const { addToast } = useToast();
   const [publicKey, setPublicKeyState] = useState<string | null>(null);
+  const [walletReady, setWalletReady] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
   // Track whether we intentionally disconnected so the heartbeat doesn't
   // immediately flag it as a silent expiry.
@@ -108,7 +112,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           localStorage.removeItem(LS_KEY);
         }
       }
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setWalletReady(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -162,7 +166,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   return (
     <WalletContext.Provider
-      value={{ publicKey, setPublicKey, sessionExpired, dismissExpired, reconnect }}
+      value={{ publicKey, setPublicKey, walletReady, sessionExpired, dismissExpired, reconnect }}
     >
       {children}
     </WalletContext.Provider>

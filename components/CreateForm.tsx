@@ -15,6 +15,7 @@ import {
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useXlmPrice } from "@/lib/price";
+import { isStreamRateTooLow, RATE_TOO_LOW_MESSAGE } from "@/lib/rateValidation";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -124,6 +125,10 @@ function validateForm(form: FormState): FormErrors {
     errors.lockupDays = "Lockup must be greater than or equal to the cliff duration.";
   } else if (!isNaN(dur) && lockup > dur) {
     errors.lockupDays = "Lockup cannot exceed total duration.";
+  }
+
+  if (!errors.amount && !errors.durationDays && isStreamRateTooLow(form.amount, dur * 86400)) {
+    errors.amount = RATE_TOO_LOW_MESSAGE;
   }
 
   return errors;
@@ -413,6 +418,7 @@ export default function CreateForm({ initialBeneficiary }: CreateFormProps = {})
   }
 
   const isValid = Object.keys(errors).length === 0;
+  const rateTooLow = errors.amount === RATE_TOO_LOW_MESSAGE;
   const showCliffField =
     form.kind === "Cliff" || form.kind === "LinearWithCliff";
   const tokenLabel =
@@ -972,7 +978,7 @@ export default function CreateForm({ initialBeneficiary }: CreateFormProps = {})
 
       <button
         type="submit"
-        disabled={status === "loading"}
+        disabled={status === "loading" || rateTooLow}
         className="btn-primary rounded-xl py-3 font-semibold text-white disabled:opacity-60"
       >
         Review &amp; Create

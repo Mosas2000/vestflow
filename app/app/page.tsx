@@ -46,7 +46,8 @@ import StreamExpiryBanner from "@/components/StreamExpiryBanner";
 import StreamBalanceBadge from "@/components/StreamBalanceBadge";
 import ActivityFeed from "@/components/ActivityFeed";
 import AnimatedClaimableCard from "@/components/AnimatedClaimableCard";
-import { balanceStatus, isExpiringSoon, maxEndTime } from "@/lib/streamHealth";
+import BatchTopUpModal from "@/components/BatchTopUpModal";
+import { balanceStatus, isExpiringSoon, isExpiringThisWeek, maxEndTime } from "@/lib/streamHealth";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
@@ -271,6 +272,7 @@ function OutgoingStreamsList({
   onEdit,
   onStop,
   onTopUp,
+  onRefresh,
 }: {
   schedules: ScheduleData[];
   publicKey: string;
@@ -279,9 +281,11 @@ function OutgoingStreamsList({
   onEdit: (s: ScheduleData) => void;
   onStop: (s: ScheduleData) => void;
   onTopUp: (s: ScheduleData) => void;
+  onRefresh: () => void;
 }) {
   const [outgoingTokenFilter, setOutgoingTokenFilter] = useState<string>("all");
   const [outgoingPage, setOutgoingPage] = useState(1);
+  const [showBatchTopUp, setShowBatchTopUp] = useState(false);
   const PAGE_SIZE = 20;
 
   const outgoing = schedules.filter(
@@ -293,6 +297,9 @@ function OutgoingStreamsList({
   const filteredOutgoing = outgoing.filter(s =>
     outgoingTokenFilter === "all" || s.token === outgoingTokenFilter
   );
+
+  const now = Math.floor(Date.now() / 1000);
+  const expiringThisWeek = outgoing.filter((s) => isExpiringThisWeek(s, now));
 
   if (outgoing.length === 0) return null;
 
@@ -308,8 +315,6 @@ function OutgoingStreamsList({
     setOutgoingPage(1);
   };
 
-  const now = Math.floor(Date.now() / 1000);
-
   return (
     <div className="card p-5 mb-6">
       <div className="mb-4 flex items-center justify-between gap-4">
@@ -318,6 +323,15 @@ function OutgoingStreamsList({
           <p className="text-sm text-zinc-500">All active vesting schedules sent from your wallet</p>
         </div>
         <div className="flex items-center gap-2">
+          {expiringThisWeek.length >= 2 && (
+            <button
+              type="button"
+              onClick={() => setShowBatchTopUp(true)}
+              className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-300 transition-colors hover:bg-amber-500/20"
+            >
+              Top Up All Expiring ({expiringThisWeek.length})
+            </button>
+          )}
           <label htmlFor="outgoing-token-filter" className="text-xs text-zinc-500">Filter by token:</label>
           <select
             id="outgoing-token-filter"
@@ -451,6 +465,15 @@ function OutgoingStreamsList({
           </button>
         </div>
       )}
+      <BatchTopUpModal
+        schedules={expiringThisWeek}
+        open={showBatchTopUp}
+        onClose={() => setShowBatchTopUp(false)}
+        onSuccess={() => {
+          setShowBatchTopUp(false);
+          onRefresh();
+        }}
+      />
     </div>
   );
 }
@@ -883,6 +906,7 @@ export default function DashboardPage() {
             onEdit={(s) => { window.location.href = `/schedule/${s.id}`; }}
             onStop={(s) => setStopConfirmSchedule(s)}
             onTopUp={(s) => setTopUpTarget(s)}
+            onRefresh={load}
           />
         )}
         {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}

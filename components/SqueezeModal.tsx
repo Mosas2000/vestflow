@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { ScheduleData, squeezeStream, getClaimableBulk, stroopsToXlm } from "@/lib/stellar";
 import { useToast } from "@/components/Toast";
+import { celebrateFirstCollect } from "@/lib/firstCollectCelebration";
 
 interface SqueezeModalProps {
   schedule: ScheduleData;
@@ -73,6 +74,7 @@ export function SqueezeModal({ schedule, publicKey, onClose, onSuccess }: Squeez
         duration: 5000,
       });
 
+      celebrateFirstCollect();
       onSuccess();
       onClose();
     } catch (err) {
